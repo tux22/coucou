@@ -152,14 +152,15 @@ fn open_url(url: String) {
     spawn_quietly(Command::new("xdg-open").arg(&url));
 }
 
-/// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
-/// and falls back to the file manager otherwise.
+/// "Open terminal": the session's working folder in VS Code when `code` is on
+/// PATH, the file manager otherwise.
+#[cfg(windows)]
 #[tauri::command]
-fn open_in_vscode(path: Option<String>) -> bool {
-    // No `cmd /C` or `sh -c` anywhere near this. The path is a project folder
-    // chosen by whoever is using Claude Code, and a shell would happily read
-    // `&`, `^`, `%` or `$` in a folder name as syntax. Finding the launcher
-    // ourselves and handing the path over as a separate argument keeps it a path.
+fn open_project(path: Option<String>) -> bool {
+    // No `cmd /C` anywhere near this. The path is a project folder chosen by
+    // whoever is using Claude Code, and cmd would happily read `&`, `^` and `%`
+    // in a folder name as syntax. Finding the launcher ourselves and handing the
+    // path over as a separate argument keeps it a path.
     let path = path.filter(|p| !p.is_empty());
     if let Some(code) = find_on_path("code") {
         let mut cmd = Command::new(code);
@@ -171,10 +172,66 @@ fn open_in_vscode(path: Option<String>) -> bool {
         }
     }
     if let Some(p) = path.as_deref() {
-        #[cfg(windows)]
         let _ = Command::new("explorer").arg(p).spawn();
-        #[cfg(not(windows))]
-        spawn_quietly(Command::new("xdg-open").arg(p));
+    }
+    false
+}
+
+/// Terminals tried in order after `$TERMINAL`. Each is started with the project
+/// as its working directory, which every one of them opens its shell in —
+/// no per-terminal flags, and no shell to parse the folder name.
+#[cfg(not(windows))]
+const TERMINALS: &[&str] = &[
+    "x-terminal-emulator", // Debian/Ubuntu's configured default
+    "gnome-terminal",
+    "kgx", // GNOME Console
+    "ptyxis",
+    "konsole",
+    "xfce4-terminal",
+    "mate-terminal",
+    "tilix",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "foot",
+    "xterm",
+];
+
+/// "Open terminal": a terminal in the session's working folder — Claude Code
+/// runs in a terminal, so that is where the user wants to land. Falls back to
+/// VS Code, then to the file manager.
+#[cfg(not(windows))]
+#[tauri::command]
+fn open_project(path: Option<String>) -> bool {
+    let dir = path
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir());
+
+    let preferred = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty());
+    let candidates = preferred.iter().map(String::as_str).chain(TERMINALS.iter().copied());
+    for name in candidates {
+        let Some(exe) = find_on_path(name) else { continue };
+        let mut cmd = Command::new(exe);
+        if let Some(d) = dir.as_deref() {
+            cmd.current_dir(d);
+        }
+        if spawn_quietly(&mut cmd) {
+            return true;
+        }
+    }
+
+    if let Some(code) = find_on_path("code") {
+        let mut cmd = Command::new(code);
+        if let Some(d) = dir.as_deref() {
+            cmd.arg(d);
+        }
+        if spawn_quietly(&mut cmd) {
+            return true;
+        }
+    }
+    if let Some(d) = dir.as_deref() {
+        spawn_quietly(Command::new("xdg-open").arg(d));
     }
     false
 }
@@ -449,7 +506,7 @@ pub fn run() {
             focus_window,
             reposition,
             open_url,
-            open_in_vscode,
+            open_project,
             quit_app,
             hooks_status,
             hooks_preview,
