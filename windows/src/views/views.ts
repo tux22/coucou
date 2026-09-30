@@ -298,7 +298,12 @@ function buildApproval(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "needs permission"));
+      // Several sessions may be waiting: name the one this card belongs to, and
+      // say how many are queued behind it.
+      const req = State.pendingApproval;
+      const queued = State.approvals.length;
+      const asking = req && State.focusTask ? { ...State.focusTask, name: req.project } : State.focusTask;
+      who.append(agentWho(asking, queued > 1 ? `needs permission · 1 of ${queued}` : "needs permission"));
       // The whole point of approving here rather than in the terminal: this line
       // is the command, the file path or the URL being authorised, not just the
       // name of the tool asking.
@@ -365,14 +370,17 @@ function buildError(actions: ViewActions): ViewHost {
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title" });
+  const openBtn = btn("Open terminal", "primary", () => actions.openTerminal());
   const row = h("div", { class: "actions" },
-    btn("Open terminal", "primary", () => actions.openTerminal()),
+    openBtn,
     btn("OK", "secondary", () => actions.collapse()),
   );
   const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
   return {
     el,
     sync() {
+      // Only when there is a session to go back to (on Linux: a tmux pane).
+      openBtn.style.display = State.canOpenTerminal(State.focusTask) ? "" : "none";
       clear(who);
       who.append(agentWho(State.focusTask, "Claude Code finished"));
       title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";

@@ -60,11 +60,12 @@ export const Bridge = {
 
   openUrl: (url: string) => call<void>("open_url", { url }),
 
-  /**
-   * "Open terminal" → the session's folder in a terminal (Linux) or in VS Code
-   * (Windows), falling back to the file manager.
-   */
+  /** Windows "Open terminal" → the session's folder in VS Code, or Explorer. */
   openProject: (path: string | null) => call<boolean>("open_project", { path }),
+
+  /** Linux: switches tmux to the pane a session runs in. */
+  jumpToSession: (tmuxSocket: string, tmuxPane: string) =>
+    call<boolean>("jump_to_session", { tmuxSocket, tmuxPane }),
 
   quit: () => call<void>("quit_app"),
 

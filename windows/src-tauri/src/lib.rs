@@ -152,8 +152,8 @@ fn open_url(url: String) {
     spawn_quietly(Command::new("xdg-open").arg(&url));
 }
 
-/// "Open terminal": the session's working folder in VS Code when `code` is on
-/// PATH, the file manager otherwise.
+/// "Open terminal" on Windows: the session's working folder in VS Code when
+/// `code` is on PATH, Explorer otherwise.
 #[cfg(windows)]
 #[tauri::command]
 fn open_project(path: Option<String>) -> bool {
@@ -177,62 +177,65 @@ fn open_project(path: Option<String>) -> bool {
     false
 }
 
-/// Terminals tried in order after `$TERMINAL`. Each is started with the project
-/// as its working directory, which every one of them opens its shell in —
-/// no per-terminal flags, and no shell to parse the folder name.
-#[cfg(not(windows))]
-const TERMINALS: &[&str] = &[
-    "x-terminal-emulator", // Debian/Ubuntu's configured default
-    "gnome-terminal",
-    "kgx", // GNOME Console
-    "ptyxis",
-    "konsole",
-    "xfce4-terminal",
-    "mate-terminal",
-    "tilix",
-    "kitty",
-    "alacritty",
-    "wezterm",
-    "foot",
-    "xterm",
-];
-
-/// "Open terminal": a terminal in the session's working folder — Claude Code
-/// runs in a terminal, so that is where the user wants to land. Falls back to
-/// VS Code, then to the file manager.
+/// Linux has nothing to open: see `jump_to_session`.
 #[cfg(not(windows))]
 #[tauri::command]
-fn open_project(path: Option<String>) -> bool {
-    let dir = path
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_dir());
+fn open_project(_path: Option<String>) -> bool {
+    false
+}
 
-    let preferred = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty());
-    let candidates = preferred.iter().map(String::as_str).chain(TERMINALS.iter().copied());
-    for name in candidates {
-        let Some(exe) = find_on_path(name) else { continue };
-        let mut cmd = Command::new(exe);
-        if let Some(d) = dir.as_deref() {
-            cmd.current_dir(d);
-        }
-        if spawn_quietly(&mut cmd) {
-            return true;
-        }
-    }
+/// "Open terminal" on Linux: back to the tmux pane the session runs in.
+///
+/// Wayland lets no app raise another app's window, and GNOME Terminal & co.
+/// offer no way to select one of their tabs from outside, so a session in a
+/// plain terminal cannot be returned to — the island then only reports. Inside
+/// tmux we can: its own server switches the attached client to the pane.
+#[cfg(not(windows))]
+#[tauri::command]
+fn jump_to_session(tmux_socket: String, tmux_pane: String) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
-    if let Some(code) = find_on_path("code") {
-        let mut cmd = Command::new(code);
-        if let Some(d) = dir.as_deref() {
-            cmd.arg(d);
-        }
-        if spawn_quietly(&mut cmd) {
-            return true;
-        }
+    // Only a pane id (`%12`) and one of our own tmux sockets. Both come from our
+    // relay, but nothing reaching a command line is taken on trust.
+    let pane_ok = tmux_pane.len() > 1
+        && tmux_pane.starts_with('%')
+        && tmux_pane[1..].bytes().all(|b| b.is_ascii_digit());
+    let socket_ok = std::path::Path::new(&tmux_socket).is_absolute()
+        && std::fs::symlink_metadata(&tmux_socket)
+            .map(|m| m.file_type().is_socket() && m.uid() == unsafe { libc::getuid() })
+            .unwrap_or(false);
+    if !pane_ok || !socket_ok {
+        return false;
     }
-    if let Some(d) = dir.as_deref() {
-        spawn_quietly(Command::new("xdg-open").arg(d));
+    let Some(tmux) = find_on_path("tmux") else {
+        log::line("tmux session, but no tmux on PATH");
+        return false;
+    };
+    let run = |args: &[&str]| {
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(&tmux_socket)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    // The window and pane inside their session, then the client onto that
+    // session. The last one fails harmlessly when the pane's session is already
+    // the one on screen, or when nobody is attached.
+    let found = run(&["select-window", "-t", &tmux_pane]) && run(&["select-pane", "-t", &tmux_pane]);
+    if found {
+        run(&["switch-client", "-t", &tmux_pane]);
     }
+    found
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn jump_to_session(_tmux_socket: String, _tmux_pane: String) -> bool {
     false
 }
 
@@ -507,6 +510,7 @@ pub fn run() {
             reposition,
             open_url,
             open_project,
+            jump_to_session,
             quit_app,
             hooks_status,
             hooks_preview,

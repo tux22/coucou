@@ -2,7 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
-import type { Platform } from "./bridge";
+import { Bridge, type Platform } from "./bridge";
 
 export type AgentSource = "claudeCode" | "n8n";
 export type PillBadge = "approval" | "finished" | "error";
@@ -20,13 +20,27 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /** Where the latest session runs, when it can be jumped back to. */
+  sessionJump?: SessionJump | null;
+}
+
+/**
+ * A tmux pane a session runs in: the only terminal location Linux lets Coucou
+ * return to (Wayland forbids raising another app's window).
+ */
+export interface SessionJump {
+  tmuxSocket: string;
+  tmuxPane: string;
 }
 
 export interface ApprovalInfo {
   requestId: string;
   sessionId: string;
+  /** Project folder name of the session asking — several may be waiting. */
+  project: string;
   tool: string;
   command: string;
+  jump?: SessionJump | null;
 }
 
 export interface ChatMessage {
@@ -127,7 +141,6 @@ class AppState {
   /** Cursor relative to the island's top-left corner. */
   mouseInIsland = { x: 0, y: 0 };
 
-  isPinned = false;
   paused = false;
 
   uploadProgress = 0;
@@ -139,7 +152,29 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
-  pendingApproval: ApprovalInfo | null = null;
+  /**
+   * Permission requests waiting for a click, oldest first. Every one of them is
+   * acknowledged to its relay, so each must stay reachable until it is answered
+   * here, answered in the terminal, or times out.
+   */
+  approvals: ApprovalInfo[] = [];
+
+  /** The request the approval card shows. */
+  get pendingApproval(): ApprovalInfo | null {
+    return this.approvals[0] ?? null;
+  }
+
+  /** A request waiting for a human keeps the island from closing on its own. */
+  get isPinned(): boolean {
+    return this.approvals.length > 0;
+  }
+
+  /** Removes a request from the queue; true if it was there. */
+  removeApproval(requestId: string): boolean {
+    const before = this.approvals.length;
+    this.approvals = this.approvals.filter((a) => a.requestId !== requestId);
+    return this.approvals.length !== before;
+  }
 
   integrations: Record<string, IntegrationInfo> = {};
 
@@ -233,7 +268,30 @@ class AppState {
     this.loadIntegrationTasks();
   }
 
+  /**
+   * Whether "Open terminal" leads anywhere for this task. On Linux only a
+   * session running inside tmux can be returned to; for any other the island
+   * just reports, with no button that would open something unrelated.
+   */
+  canOpenTerminal(task: AgentTask | null): boolean {
+    if (!task) return false;
+    return this.platform !== "linux" || task.sessionJump != null;
+  }
+
+  /** "Open terminal": back to the session (Linux, tmux) or its folder (Windows). */
+  openTerminal(task: AgentTask | null) {
+    if (!task || !this.canOpenTerminal(task)) return;
+    if (this.platform === "linux") {
+      const j = task.sessionJump!;
+      void Bridge.jumpToSession(j.tmuxSocket, j.tmuxPane);
+    } else {
+      void Bridge.openProject(task.sessionCwd ?? null);
+    }
+  }
+
   defaultView(): IslandViewName {
+    // Reopening the island always leads back to a request still waiting.
+    if (this.approvals.length > 0) return "approval";
     return this.tasks.length === 0 ? "empty" : "overview";
   }
 }

@@ -141,6 +141,9 @@ fn read_event() -> Option<(String, String)> {
         ("term_session_id", "TERM_SESSION_ID"),
         ("vscode_pid", "VSCODE_PID"),
         ("session_pid", "CLAUDE_CODE_SSE_PORT"),
+        // Linux: the tmux pane is the one place Coucou can take the user back to.
+        ("tmux", "TMUX"),
+        ("tmux_pane", "TMUX_PANE"),
     ] {
         if !map.contains_key(key) {
             let value = std::env::var(var).unwrap_or_default();

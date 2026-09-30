@@ -110,11 +110,10 @@ export class Island {
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
+        // The Claude pill is the way back to a request still waiting.
+        if (id === "integration_claude" && State.approvals.length > 0) this.setView("approval");
       },
-      openTerminal: () => {
-        const cwd = State.focusTask?.sessionCwd ?? null;
-        void Bridge.openProject(cwd);
-      },
+      openTerminal: () => State.openTerminal(State.focusTask),
       // The ↗ button — same targets as openAgentTarget() on macOS.
       openTarget: () => {
         const task = State.focusTask;
@@ -127,7 +126,7 @@ export class Island {
           integration_notion: "https://notion.so",
           integration_calcom: "https://app.cal.com/bookings",
         };
-        if (task.id === "integration_claude") void Bridge.openProject(task.sessionCwd ?? null);
+        if (task.id === "integration_claude") State.openTerminal(task);
         else if (task.id === "integration_n8n") void Bridge.openN8n();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
       },
@@ -140,12 +139,7 @@ export class Island {
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
         void Bridge.approvalDecision(req.requestId, d);
-        State.pendingApproval = null;
-        State.isPinned = false;
-        this.fsm.pinned = false;
-        State.updateTask("integration_claude", "working");
-        State.setPillBadge("integration_claude", null);
-        this.setView(State.defaultView());
+        this.approvalGone(req.requestId);
       },
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
@@ -224,6 +218,7 @@ export class Island {
   // ── FSM ─────────────────────────────────────────────────────────────────────
 
   private wireFsm() {
+    this.fsm.pinned = () => State.isPinned;
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.onTransition = (from, to) => {
       switch (to) {
@@ -263,7 +258,6 @@ export class Island {
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
       Sound.play("close");
-      State.isPinned = false;
       void Bridge.focusWindow(false);
     }
     if (mode !== "expanded") {
@@ -315,8 +309,6 @@ export class Island {
   }
 
   collapse() {
-    State.isPinned = false;
-    this.fsm.pinned = false;
     // Drive the state machine rather than the mode: setting the mode behind its
     // back left it thinking the island was still open, and a click on the compact
     // island then did nothing — the island could never be reopened.
@@ -325,7 +317,6 @@ export class Island {
 
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
   alert(view: IslandViewName) {
-    this.fsm.pinned = State.isPinned;
     this.fsm.forceHome();
     this.expand(view);
   }
@@ -335,8 +326,23 @@ export class Island {
   }
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
-  dropPin() {
-    this.fsm.pinned = false;
+  /**
+   * A permission request left the queue — answered here, answered in the
+   * terminal, or timed out. The card moves on to the next one, or the island
+   * goes back to normal once nobody is waiting.
+   */
+  approvalGone(requestId: string) {
+    const wasShown = State.pendingApproval?.requestId === requestId;
+    if (!State.removeApproval(requestId)) return;
+    if (State.approvals.length > 0) {
+      if (wasShown && State.view === "approval") State.notify();
+      return;
+    }
+    State.updateTask("integration_claude", "working");
+    State.setPillBadge("integration_claude", null);
+    if (State.view === "approval") this.setView(State.defaultView());
+    this.fsm.unpinned();
+    State.notify();
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
       "deb": {
         "section": "devel",
         "depends": ["gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good"],
-        "recommends": ["gnome-keyring | kwalletmanager | keepassxc", "xdg-utils"]
+        "recommends": ["gnome-keyring | kwalletmanager | keepassxc", "xdg-utils", "tmux"]
       },
       "appimage": {
         "bundleMediaFramework": true

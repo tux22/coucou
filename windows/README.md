@@ -149,7 +149,9 @@ windows/
 - No notch, so the island lives at the top centre of the screen and retracts into
   the top edge instead of hiding in a notch.
 - Permission approval works from **any** terminal; the Mac build only listens to
-  VS Code sessions.
+  VS Code sessions. Requests from several sessions queue up on the card
+  ("1 of 2") and each gets its own answer; the island stays open while one waits,
+  and one answered in the terminal leaves the card when its session moves on.
 - Not in this version: sending a file by email, dragging Mochi onto a window to
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.
@@ -193,6 +195,13 @@ desktops already have, plus the GStreamer "good" plugins for Mochi's sounds.
   `~/.local/share/coucou/`. `~/.claude/settings.json` gets the same backup,
   diff and explicit confirmation as everywhere else.
 - **Start at login** adds a standard entry in `~/.config/autostart/`.
+- **"Open terminal" needs tmux.** Wayland lets no app bring another app's
+  window forward, and GNOME Terminal, Konsole & co. offer no way to select one
+  of their tabs from outside, so a session in a plain terminal cannot be
+  returned to: the island tells you it finished and that is all. Run Claude
+  Code inside [tmux](https://github.com/tmux/tmux) and the button switches tmux
+  back to the session's window and pane (bring the terminal forward yourself).
+  The `.deb` recommends tmux.
 - A file dragged from the file manager has to be dropped on the island itself
   (on Windows the whole panel takes it).
 
