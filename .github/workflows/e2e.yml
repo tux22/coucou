@@ -116,7 +116,7 @@ jobs:
       # has paused Windows downloads until the unsigned installer stops being
       # flagged by Microsoft Defender.
       - uses: actions/upload-artifact@v4
-        if: github.repository != 'Louis-CFM/coucou'
+        if: ${{ !cancelled() && github.repository != 'Louis-CFM/coucou' }}
         with:
           name: coucou-windows-installer-test
           path: windows/target/release/bundle/nsis/*-setup.exe
