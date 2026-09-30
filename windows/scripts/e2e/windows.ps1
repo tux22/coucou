@@ -108,7 +108,7 @@ New-Item -ItemType Directory -Force $claude | Out-Null
 $hooks = [ordered]@{}
 foreach ($e in 'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
   'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop', 'StopFailure', 'SubagentStart', 'SubagentStop') {
-  $hooks[$e] = @(@{ hooks = @(@{ type = 'command'; command = "`"$($Hook -replace '\\', '/')`" $e" }) })
+  $hooks[$e] = @(@{ hooks = @(@{ type = 'command'; command = $Hook; args = @($e) }) })
 }
 @{ hooks = $hooks } | ConvertTo-Json -Depth 8 | Set-Content -Encoding ascii (Join-Path $claude 'settings.json')
 
@@ -119,6 +119,14 @@ try {
   $deadline = (Get-Date).AddSeconds(60)
   while (-not (Test-Path $Hook) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
   Check "the relay was installed at launch" (Test-Path $Hook)
+  # A PC without the Visual C++ Redistributable cannot load a binary that
+  # imports it — the relay used to die there before running (0xC0000135).
+  # The runner has the Redistributable, so only reading the imports shows it.
+  foreach ($exe in @($Hook, (Resolve-Path $Bin).Path)) {
+    $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+    $name = Split-Path $exe -Leaf
+    Check "$name does not need the Visual C++ runtime DLLs" (-not ($text -imatch 'vcruntime140(_1)?\.dll|msvcp140\.dll'))
+  }
   Away
   Start-Sleep 3
   Shot 'greeting'

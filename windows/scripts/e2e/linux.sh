@@ -74,7 +74,7 @@ events="SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostTool
   printf '{"hooks":{'
   sep=""
   for e in $events; do
-    printf '%s"%s":[{"hooks":[{"type":"command","command":"\"%s\" %s"}]}]' "$sep" "$e" "$HOME/.local/share/coucou/bin/coucou-hook" "$e"
+    printf '%s"%s":[{"hooks":[{"type":"command","command":"%s","args":["%s"]}]}]' "$sep" "$e" "$HOME/.local/share/coucou/bin/coucou-hook" "$e"
     sep=","
   done
   printf '}}\n'
