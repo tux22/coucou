@@ -248,6 +248,8 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
+    // Linux never shrinks the window: see `set_wake_only`.
+    let collapsed = collapsed && cfg!(windows);
     let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
@@ -289,6 +291,9 @@ pub fn make_non_activating(win: &WebviewWindow) {
     use gtk::prelude::{GtkWindowExt, WidgetExt};
     let _ = win.set_focusable(false);
     let _ = win.set_skip_taskbar(true);
+    // Keeps GTK from pinning the size with min = max hints (see
+    // `set_wake_only`); without decorations nobody can resize it anyway.
+    let _ = win.set_resizable(true);
     if let Ok(gtk_win) = win.gtk_window() {
         // Window managers only read the type hint when a window is mapped, and
         // the island is created visible: unmap it here, `setup` shows it again.
@@ -296,6 +301,67 @@ pub fn make_non_activating(win: &WebviewWindow) {
         gtk_win.set_skip_pager_hint(true);
         gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
         gtk_win.stick();
+    }
+}
+
+/// Which part of the island window takes the mouse.
+#[derive(Clone, Copy)]
+pub enum Input {
+    /// The whole window.
+    All,
+    /// Nothing: clicks go to whatever is underneath.
+    Nothing,
+    /// Only the wake strip (Linux, hidden island).
+    WakeStrip,
+}
+
+/// Sets the window's input region.
+///
+/// Linux: the hidden island keeps its full-size window and takes the mouse on
+/// the wake strip only. Shrinking the window to the strip, as on Windows, is
+/// what broke it: a non-resizable GTK window gets its size from min = max WM
+/// hints, and when the panel grew back Mutter/XWayland could apply the new
+/// height before the new width, leaving a 240-px-wide window with the island
+/// cut off inside. A window that never changes size has nothing to get half-way
+/// through, and everything outside the strip is transparent and click-through,
+/// so a hidden island still costs nothing.
+///
+/// Every change goes through this one main-thread queue, so they land in the
+/// order they were made — mixing it with Tauri's own `set_ignore_cursor_events`
+/// could let a stale "ignore" arrive after the strip and leave the hidden
+/// island impossible to wake.
+#[cfg(not(windows))]
+pub fn set_input(app: &AppHandle, input: Input) {
+    use gtk::cairo::{RectangleInt, Region};
+    use gtk::prelude::WidgetExt;
+    let Some(win) = window(app) else { return };
+    let _ = app.run_on_main_thread(move || {
+        let Ok(gtk_win) = win.gtk_window() else { return };
+        let rect = match input {
+            Input::All => {
+                gtk_win.input_shape_combine_region(None);
+                return;
+            }
+            // What Tauri itself does for "ignore the cursor": a single pixel in
+            // the corner, which on the island window is always transparent.
+            Input::Nothing => RectangleInt::new(0, 0, 1, 1),
+            Input::WakeStrip => RectangleInt::new(
+                ((PANEL_W - STRIP_W) / 2.0).round() as i32,
+                0,
+                STRIP_W as i32,
+                STRIP_H as i32,
+            ),
+        };
+        if let Some(gdk_win) = gtk_win.window() {
+            gdk_win.input_shape_combine_region(&Region::create_rectangle(&rect), 0, 0);
+        }
+    });
+}
+
+#[cfg(windows)]
+pub fn set_input(app: &AppHandle, input: Input) {
+    if let Some(win) = window(app) {
+        let _ = win.set_ignore_cursor_events(matches!(input, Input::Nothing));
     }
 }
 
@@ -414,17 +480,11 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let accept = on_island || dragging;
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     gate.ignoring.store(!accept, Ordering::Relaxed);
-                    let _ = win.set_ignore_cursor_events(!accept);
+                    set_input(&app, if accept { Input::All } else { Input::Nothing });
                 }
 
                 let _ = win.emit("cursor", CursorPayload { x, y });
             }
         }
     });
-}
-
-pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
-    if let Some(win) = window(app) {
-        let _ = win.set_ignore_cursor_events(ignore);
-    }
 }

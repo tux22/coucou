@@ -113,8 +113,11 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     let pref = shared.settings.lock().unwrap().screen.clone();
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
-    // The wake strip must always take the mouse, and a resize invalidates the flag.
-    island::set_ignore_cursor(&app, false);
+    // The wake strip must always take the mouse, and a resize invalidates the
+    // flag. On Windows the window *is* the strip; Linux keeps the window full
+    // size and narrows its input to the strip.
+    let input = if collapsed && cfg!(not(windows)) { island::Input::WakeStrip } else { island::Input::All };
+    island::set_input(&app, input);
     shared.gate.forget_ignore_state();
     shared.gate.set_active(!collapsed);
 }
