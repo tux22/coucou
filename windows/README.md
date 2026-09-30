@@ -139,6 +139,23 @@ windows/
   scripts/             icon generator, pack script
 ```
 
+### End-to-end tests
+
+`scripts/e2e/linux.sh` and `scripts/e2e/windows.ps1` start a release build,
+send it Claude Code hook events through the real relay, click the island (the
+approval queue, Allow/Deny, minimize and reopen) and check what Claude Code
+would receive. They also save GIFs (Linux) and screenshots (both) in
+`windows/e2e-out/`, handy for pull requests. Your own settings are never
+touched: both scripts point the app at throwaway folders.
+
+```bash
+npx tauri build --no-bundle
+scripts/e2e/linux.sh      # Xvfb, xdotool, ffmpeg, dbus-x11, and mutter or picom
+```
+
+The `E2E` workflow runs both on every pull request touching `windows/` and
+uploads the results as artifacts.
+
 ### Log
 
 `%LOCALAPPDATA%\Coucou\coucou.log` (Linux: `~/.local/share/coucou/coucou.log`)

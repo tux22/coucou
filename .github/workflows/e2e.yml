@@ -1,0 +1,111 @@
+name: E2E
+
+# Builds the Windows/Linux app and drives it end to end on both systems: real
+# app, real coucou-hook relay, real clicks on the island. Uploads the GIFs,
+# screenshots and logs as artifacts, for reviewing a change and for pull
+# requests (CONTRIBUTING asks for a GIF or screenshot of anything visual).
+# Publishes nothing.
+
+on:
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - 'windows/**'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    # 24.04: the same GNOME/Mutter 46 as Ubuntu 24.04 LTS desktops.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries and the virtual desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libxdo-dev patchelf file \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            xvfb mutter dbus-x11 xdotool ffmpeg x11-xserver-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: e2e-linux-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: e2e-linux-cargo-
+
+      - run: npm ci
+      - name: Build
+        run: npx tauri build --no-bundle
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: End to end
+        run: scripts/e2e/linux.sh target/release/coucou e2e-out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-linux
+          path: windows/e2e-out
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: e2e-windows-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: e2e-windows-cargo-
+
+      - run: npm ci
+      - name: Build
+        run: npx tauri build --no-bundle
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: End to end
+        shell: pwsh
+        run: ./scripts/e2e/windows.ps1 -Bin target/release/coucou.exe -Out e2e-out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-windows
+          path: windows/e2e-out
