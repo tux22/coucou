@@ -96,8 +96,10 @@ jobs:
           restore-keys: e2e-windows-cargo-
 
       - run: npm ci
+      # The full build, installer included: the same compile, and a fork gets
+      # something to install on a test machine (see the upload below).
       - name: Build
-        run: npx tauri build --no-bundle
+        run: npx tauri build
       - name: Unit tests
         run: cargo test --workspace
       - name: End to end
@@ -109,3 +111,13 @@ jobs:
         with:
           name: e2e-windows
           path: windows/e2e-out
+
+      # For testing a branch on a real PC. Never on the main repository, which
+      # has paused Windows downloads until the unsigned installer stops being
+      # flagged by Microsoft Defender.
+      - uses: actions/upload-artifact@v4
+        if: github.repository != 'Louis-CFM/coucou'
+        with:
+          name: coucou-windows-installer-test
+          path: windows/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7
