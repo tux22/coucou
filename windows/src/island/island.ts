@@ -551,7 +551,8 @@ export class Island {
     });
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
+      // Waiting requests are not lost by minimizing: reopening leads back to them.
+      if (e.key === "Escape" && State.mode === "expanded") this.collapse();
       State.lastActivity = performance.now();
     });
 
@@ -728,7 +729,10 @@ export class Island {
       ? settling
       : settling ||
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
-        greetingActive || this.engine.busy || UploadSeq.isActive;
+        greetingActive || this.engine.busy || UploadSeq.isActive ||
+        // A step scrolling into the ticker: without this the loop could stop
+        // mid-scroll and the new step would only appear with the next event.
+        this.views.get(State.view)?.animating === true;
 
     if (busy) {
       requestAnimationFrame(this.frame);

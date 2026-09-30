@@ -22,11 +22,33 @@ const approvalTimers = new Map<string, number>();
 function dropSessionApprovals(island: Island, sessionId: string | undefined) {
   if (!sessionId) return;
   for (const a of State.approvals.filter((x) => x.sessionId === sessionId)) {
-    const timer = approvalTimers.get(a.requestId);
-    if (timer != null) window.clearTimeout(timer);
-    approvalTimers.delete(a.requestId);
-    void Bridge.approvalDecline(a.requestId);
-    island.approvalGone(a.requestId);
+    releaseApproval(island, a.requestId);
+  }
+}
+
+/** Identifies one tool call, to match a request with the call it asked about. */
+function callKey(tool: string, input: Record<string, unknown>): string {
+  return `${tool}\u0000${JSON.stringify(input)}`;
+}
+
+/** Forgets a request, stopping its timer and releasing its relay. */
+function releaseApproval(island: Island, requestId: string) {
+  const timer = approvalTimers.get(requestId);
+  if (timer != null) window.clearTimeout(timer);
+  approvalTimers.delete(requestId);
+  void Bridge.approvalDecline(requestId);
+  island.approvalGone(requestId);
+}
+
+/**
+ * The tool call a card asks about just ran (or failed): the user answered in
+ * the terminal, and the card would now be asking about something already done.
+ */
+function releaseAnsweredElsewhere(island: Island, payload: HookPayload) {
+  const key = callKey(payload.tool_name ?? "", payload.tool_input ?? {});
+  const sessionId = payload.session_id ?? "";
+  for (const a of State.approvals.filter((x) => x.sessionId === sessionId && x.callKey === key)) {
+    releaseApproval(island, a.requestId);
   }
 }
 
@@ -51,6 +73,8 @@ interface HookPayload {
   /** $TMUX and $TMUX_PANE of the shell Claude Code runs in. */
   tmux?: string;
   tmux_pane?: string;
+  /** PostToolUseFailure: what went wrong. */
+  error?: unknown;
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -70,21 +94,23 @@ function lastPathComponent(p: string): string {
 }
 
 /** frenchStep() — same labels as the macOS app. */
+// English, like the rest of the Windows/Linux island (the Mac build says these
+// in French).
 const TOOL_LABELS: Record<string, string> = {
-  Bash: "Exécute",
-  Read: "Lit",
-  Write: "Écrit",
-  Edit: "Modifie",
-  Glob: "Cherche",
-  Grep: "Recherche",
-  WebSearch: "Recherche web",
-  WebFetch: "Récupère",
-  TodoWrite: "Tâches",
+  Bash: "Run",
+  Read: "Read",
+  Write: "Write",
+  Edit: "Edit",
+  Glob: "Find",
+  Grep: "Search",
+  WebSearch: "Web search",
+  WebFetch: "Fetch",
+  TodoWrite: "Todos",
   Task: "Agent",
-  LS: "Liste",
-  MultiEdit: "Modifie",
+  LS: "List",
+  MultiEdit: "Edit",
   NotebookEdit: "Notebook",
-  PowerShell: "Exécute",
+  PowerShell: "Run",
 };
 
 function stepLabel(tool: string, input: Record<string, unknown>): string {
@@ -149,6 +175,15 @@ function clearSession() {
 
 export function registerHookHandlers(island: Island) {
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
+  // The relay hung up: Claude Code stopped waiting for it (answered in the
+  // terminal, or the session was interrupted). Its card has nothing left to do.
+  void onEvent<{ requestId: string }>("approval-gone", ({ requestId }) => {
+    const timer = approvalTimers.get(requestId);
+    if (timer != null) window.clearTimeout(timer);
+    approvalTimers.delete(requestId);
+    island.approvalGone(requestId);
+    State.notify();
+  });
 }
 
 function handleHook(island: Island, payload: HookPayload) {
@@ -206,13 +241,20 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "PostToolUse":
+      releaseAnsweredElsewhere(island, payload);
       State.updateTask(CLAUDE_ID, "working");
       break;
 
-    case "PostToolUseFailure":
+    case "PostToolUseFailure": {
+      releaseAnsweredElsewhere(island, payload);
       State.updateTask(CLAUDE_ID, "working");
-      State.appendStep(CLAUDE_ID, "⚠ failed");
+      // Which tool, and why: a bare "failed" said nothing. Most of these are
+      // ordinary — a grep with no match or a failing test exits non-zero.
+      const tool = TOOL_LABELS[payload.tool_name ?? ""] ?? payload.tool_name ?? "Tool";
+      const why = typeof payload.error === "string" ? payload.error.split("\n")[0].slice(0, 40) : "";
+      State.appendStep(CLAUDE_ID, why ? `⚠ ${tool} failed · ${why}` : `⚠ ${tool} failed`);
       break;
+    }
 
     case "Notification": {
       const message = payload.message ?? "";
@@ -276,6 +318,7 @@ function handleHook(island: Island, payload: HookPayload) {
         project: projectName,
         tool,
         command: approvalTarget(tool, input),
+        callKey: callKey(tool, input),
         jump,
       });
       const first = State.approvals.length === 1;

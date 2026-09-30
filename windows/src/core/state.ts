@@ -40,6 +40,8 @@ export interface ApprovalInfo {
   project: string;
   tool: string;
   command: string;
+  /** Tool + input, to recognise the call once it runs without us. */
+  callKey: string;
   jump?: SessionJump | null;
 }
 
