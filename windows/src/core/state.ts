@@ -42,6 +42,8 @@ export interface ApprovalInfo {
   command: string;
   /** Tool + input, to recognise the call once it runs without us. */
   callKey: string;
+  /** Claude Code's id for the call, when the event carries one. */
+  toolUseId: string;
   jump?: SessionJump | null;
 }
 

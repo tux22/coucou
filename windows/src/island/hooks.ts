@@ -6,7 +6,7 @@
 
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
-import { State, type SessionJump } from "../core/state";
+import { State, type ApprovalInfo, type SessionJump } from "../core/state";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -41,13 +41,18 @@ function releaseApproval(island: Island, requestId: string) {
 }
 
 /**
- * The tool call a card asks about just ran (or failed): the user answered in
- * the terminal, and the card would now be asking about something already done.
+ * The tool call a card asks about ran, failed or was denied: the user answered
+ * in the terminal — Claude Code sends no event for that answer itself — and the
+ * card would now be asking about something already settled. Matched on
+ * tool_use_id when both sides carry it, else on the tool and its exact input.
  */
 function releaseAnsweredElsewhere(island: Island, payload: HookPayload) {
+  const id = payload.tool_use_id ?? "";
   const key = callKey(payload.tool_name ?? "", payload.tool_input ?? {});
   const sessionId = payload.session_id ?? "";
-  for (const a of State.approvals.filter((x) => x.sessionId === sessionId && x.callKey === key)) {
+  const same = (a: ApprovalInfo) =>
+    a.sessionId === sessionId && (id && a.toolUseId ? a.toolUseId === id : a.callKey === key);
+  for (const a of State.approvals.filter(same)) {
     releaseApproval(island, a.requestId);
   }
 }
@@ -75,6 +80,8 @@ interface HookPayload {
   tmux_pane?: string;
   /** PostToolUseFailure: what went wrong. */
   error?: unknown;
+  /** Identifies one tool call across PermissionRequest, PostToolUse… */
+  tool_use_id?: string;
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -245,6 +252,13 @@ function handleHook(island: Island, payload: HookPayload) {
       State.updateTask(CLAUDE_ID, "working");
       break;
 
+    case "PermissionDenied": {
+      releaseAnsweredElsewhere(island, payload);
+      const tool = TOOL_LABELS[payload.tool_name ?? ""] ?? payload.tool_name ?? "Tool";
+      State.appendStep(CLAUDE_ID, `✕ ${tool} denied`);
+      break;
+    }
+
     case "PostToolUseFailure": {
       releaseAnsweredElsewhere(island, payload);
       State.updateTask(CLAUDE_ID, "working");
@@ -319,6 +333,7 @@ function handleHook(island: Island, payload: HookPayload) {
         tool,
         command: approvalTarget(tool, input),
         callKey: callKey(tool, input),
+        toolUseId: payload.tool_use_id ?? "",
         jump,
       });
       const first = State.approvals.length === 1;

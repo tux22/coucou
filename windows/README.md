@@ -151,7 +151,8 @@ windows/
 - Permission approval works from **any** terminal; the Mac build only listens to
   VS Code sessions. Requests from several sessions queue up on the card
   ("1 of 2") and each gets its own answer; the island stays open while one waits,
-  and one answered in the terminal leaves the card when its session moves on.
+  and one answered in the terminal leaves the card as soon as Claude Code runs
+  or denies that call (Claude Code sends no event for the answer itself).
 - Not in this version: sending a file by email, dragging Mochi onto a window to
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.
