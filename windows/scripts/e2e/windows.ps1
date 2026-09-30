@@ -25,6 +25,16 @@ using System.Runtime.InteropServices;
 public static class Input {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, UIntPtr e);
+  [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+  [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+  // SRCCOPY | CAPTUREBLT: without CAPTUREBLT a screen copy leaves out layered
+  // windows, and the island is one. .NET's CopyFromScreen refuses the flag.
+  public static void Grab(IntPtr dst, int x, int y, int w, int h) {
+    IntPtr screen = GetDC(IntPtr.Zero);
+    BitBlt(dst, 0, 0, w, h, screen, x, y, 0x00CC0020 | 0x40000000);
+    ReleaseDC(IntPtr.Zero, screen);
+  }
   public static void Click(int x, int y) {
     SetCursorPos(x, y);
     System.Threading.Thread.Sleep(350);
@@ -56,16 +66,20 @@ function Check([string]$what, [bool]$ok) {
   if ($ok) { Write-Host "  ok    $what" } else { Write-Host "  FAIL  $what"; $script:failures++ }
 }
 
-# The island is a layered, DirectComposition window: CaptureBlt is what lets a
-# screen copy see it at all.
+# A screenshot is a nice-to-have: one that fails is reported, never fatal.
 function Shot([string]$name) {
-  $w = 900; $h = 230; $x = [int](($W - $w) / 2)
-  $bmp = New-Object System.Drawing.Bitmap $w, $h
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
-  $op = [System.Drawing.CopyPixelOperation]::SourceCopy -bor [System.Drawing.CopyPixelOperation]::CaptureBlt
-  $g.CopyFromScreen($x, 0, 0, 0, (New-Object System.Drawing.Size $w, $h), $op)
-  $bmp.Save((Join-Path $Out "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
-  $g.Dispose(); $bmp.Dispose()
+  try {
+    $w = [Math]::Min(900, $W); $h = 230; $x = [int](($W - $w) / 2)
+    $bmp = New-Object System.Drawing.Bitmap $w, $h
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [Input]::Grab($hdc, $x, 0, $w, $h)
+    $g.ReleaseHdc($hdc)
+    $bmp.Save((Join-Path $Out "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose(); $bmp.Dispose()
+  } catch {
+    Write-Host "  (screenshot $name failed: $($_.Exception.Message))"
+  }
 }
 
 # Runs the relay the way Claude Code does: JSON on stdin, decision on stdout.

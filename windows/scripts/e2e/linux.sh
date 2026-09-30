@@ -39,7 +39,10 @@ cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   [ -n "${DBUS_SESSION_BUS_PID:-}" ] && kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
   cp "$LOG" "$OUT/coucou.log" 2>/dev/null || true
-  rm -rf "$work"
+  # On a GNOME runner the document portal mounts a FUSE folder in our runtime
+  # dir; unmount it, and never let cleanup change the result.
+  fusermount -u "$work/run/doc" 2>/dev/null || fusermount3 -u "$work/run/doc" 2>/dev/null || true
+  rm -rf "$work" 2>/dev/null || true
 }
 trap cleanup EXIT
 
