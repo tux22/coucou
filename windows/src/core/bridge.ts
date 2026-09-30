@@ -26,6 +26,16 @@ export interface BootInfo {
   screen: { x: number; y: number; width: number; height: number; scale: number };
   version: string;
   hookPath: string;
+  platform: Platform;
+}
+
+export type Platform = "windows" | "linux";
+
+/** Where API keys live, in words the user recognises. */
+export function keychainName(platform: Platform): string {
+  return platform === "linux"
+    ? "your system keyring (Secret Service)"
+    : "the Windows Credential Manager";
 }
 
 export const Bridge = {
@@ -57,7 +67,7 @@ export const Bridge = {
 
   openSettingsWindow: () => call<void>("open_settings_window"),
 
-  /** Writes to %LOCALAPPDATA%\Coucou\coucou.log, next to the Rust lines. */
+  /** Writes to coucou.log (%LOCALAPPDATA%\Coucou or ~/.local/share/coucou), next to the Rust lines. */
   log: (message: string) => call<void>("log_line", { message }),
 
   // ── Claude Code hooks ─────────────────────────────────────────────────────

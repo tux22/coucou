@@ -1,0 +1,129 @@
+name: Linux
+
+# Builds the Linux app (.deb, .AppImage, .tar.gz) and publishes them.
+# Triggered by tags like `linux-v0.1.1`; the macOS and Windows workflows are
+# untouched. The app itself lives in windows/, which is the Tauri port shared by
+# Windows and Linux.
+
+on:
+  push:
+    tags:
+      - 'linux-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # The oldest supported runner: the binaries link against its glibc, so
+    # building here is what lets them run on older distributions too.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libxdo-dev patchelf file \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: linux-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: linux-cargo-
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Same check as the Windows workflow: three files carry the version and
+      # they drift silently.
+      - name: Check the tag and every version agree
+        if: startsWith(github.ref, 'refs/tags/linux-v')
+        run: |
+          tag="${GITHUB_REF_NAME#linux-v}"
+          conf=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          pkg=$(node -p 'require("./package.json").version')
+          cargo=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag tauri.conf=$conf package.json=$pkg Cargo.toml=$cargo"
+          bad=""
+          [ "$tag" = "$conf" ]  || bad="$bad tauri.conf.json says $conf;"
+          [ "$tag" = "$pkg" ]   || bad="$bad package.json says $pkg;"
+          [ "$tag" = "$cargo" ] || bad="$bad Cargo.toml says $cargo;"
+          if [ -n "$bad" ]; then echo "tag says $tag but$bad"; exit 1; fi
+
+      # `npm run build` (run by tauri as beforeBuildCommand) builds coucou-hook
+      # first, which tauri.linux.conf.json then bundles as a resource. `pack`
+      # then copies the .deb and .AppImage out of target/ and builds the tarball.
+      - name: Build and pack
+        id: pack
+        run: |
+          npm run pack
+          echo "version=$(node -p 'require("./src-tauri/tauri.conf.json").version')" >> "$GITHUB_OUTPUT"
+          ls -l release
+
+      # After the build: the app embeds dist/ at compile time.
+      - name: Test
+        run: cargo test --workspace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Coucou-Linux
+          path: |
+            windows/release/Coucou-Linux-${{ steps.pack.outputs.version }}-*
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/linux-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.pack.outputs.version }}"
+          notes="Coucou for Linux $v — Mochi at the top of your screen.
+
+          - Debian / Ubuntu: \`sudo apt install ./Coucou-Linux-$v-amd64.deb\`
+          - Any distribution: \`chmod +x Coucou-Linux-$v-x86_64.AppImage\` and run it
+          - Or unpack \`Coucou-Linux-$v-x86_64.tar.gz\` and run \`./install.sh\` (per user, no root)"
+          # --latest=false: the macOS \`v*\` releases own the "Latest" slot the
+          # site's Download for Mac button points at.
+          gh release create "$GITHUB_REF_NAME" release/Coucou-Linux-"$v"-* \
+            --title "Coucou for Linux $v" \
+            --notes "$notes" \
+            --latest=false
+
+      - name: Update the rolling linux-latest release
+        if: startsWith(github.ref, 'refs/tags/linux-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.pack.outputs.version }}"
+          rolling="release/Coucou-Linux-amd64.deb release/Coucou-Linux-x86_64.AppImage release/Coucou-Linux-x86_64.tar.gz"
+          if gh release view linux-latest >/dev/null 2>&1; then
+            # The tag has to follow the release, or linux-latest keeps pointing
+            # at the first commit it was ever created from.
+            git tag -f linux-latest "$GITHUB_SHA"
+            git push -f origin linux-latest
+            gh release edit linux-latest --title "Coucou for Linux (latest)" --notes "Always the newest Linux build — currently $v."
+            gh release upload linux-latest $rolling --clobber
+          else
+            gh release create linux-latest $rolling \
+              --title "Coucou for Linux (latest)" \
+              --notes "Always the newest Linux build — currently $v." \
+              --latest=false
+          fi

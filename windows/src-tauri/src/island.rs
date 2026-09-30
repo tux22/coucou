@@ -4,6 +4,10 @@
 // There is no notch on a PC, so the island is a black shape drawn at the top
 // centre of the main display inside a borderless, transparent, always-on-top
 // window that never takes focus.
+//
+// On Linux the same window runs under X11 (natively or through XWayland — see
+// `lib.rs`): Wayland lets no client place itself or read the global cursor, and
+// the island needs both.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,12 +16,17 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use windows::Win32::Foundation::{HWND, POINT};
+#[cfg(windows)]
 use windows::core::BOOL;
-use windows::Win32::Foundation::LPARAM;
+#[cfg(windows)]
+use windows::Win32::Foundation::{HWND, LPARAM, POINT};
+#[cfg(windows)]
 use windows::Win32::System::Ole::RevokeDragDrop;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW,
@@ -114,10 +123,18 @@ pub fn window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(WINDOW_LABEL)
 }
 
-fn cursor_physical() -> Option<(f64, f64)> {
+#[cfg(windows)]
+fn cursor_physical(_app: &AppHandle) -> Option<(f64, f64)> {
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p).ok()? };
     Some((p.x as f64, p.y as f64))
+}
+
+/// Global pointer position through GDK, in physical pixels.
+#[cfg(not(windows))]
+fn cursor_physical(app: &AppHandle) -> Option<(f64, f64)> {
+    let p = app.cursor_position().ok()?;
+    Some((p.x, p.y))
 }
 
 /// Lets dropped files reach the app again.
@@ -131,6 +148,7 @@ fn cursor_physical() -> Option<(f64, f64)> {
 /// that feeds Tauri's drag events.
 ///
 /// Cheap and idempotent, so it is simply re-run whenever a drag might be starting.
+#[cfg(windows)]
 pub fn unblock_webview_drops(app: &AppHandle) {
     for label in [WINDOW_LABEL, "settings"] {
         let Some(win) = app.get_webview_window(label) else { continue };
@@ -141,6 +159,7 @@ pub fn unblock_webview_drops(app: &AppHandle) {
     }
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn revoke_render_widget(hwnd: HWND, _: LPARAM) -> BOOL {
     let mut name = [0u16; 64];
     let len = unsafe { GetClassNameW(hwnd, &mut name) };
@@ -155,8 +174,26 @@ unsafe extern "system" fn revoke_render_widget(hwnd: HWND, _: LPARAM) -> BOOL {
 
 /// True while the left mouse button is held — the only signal we get that a
 /// drag might be in flight before it reaches the window.
+#[cfg(windows)]
 fn left_button_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(windows)]
+fn drag_may_start(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || unblock_webview_drops(&handle));
+}
+
+#[cfg(not(windows))]
+fn drag_may_start(_app: &AppHandle) {}
+
+/// GTK hands drags to whichever window is under the pointer once its input
+/// shape takes the mouse, which happens as soon as the pointer is over the
+/// island; there is no WebView2 drop target to fight. No need to watch the button.
+#[cfg(not(windows))]
+fn left_button_down() -> bool {
+    false
 }
 
 fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
@@ -172,7 +209,7 @@ fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
 fn target_monitor(app: &AppHandle, pref: &str) -> Option<Monitor> {
     let monitors = app.available_monitors().ok()?;
     if pref == "cursor" {
-        if let Some((cx, cy)) = cursor_physical() {
+        if let Some((cx, cy)) = cursor_physical(app) {
             if let Some(m) = monitors.iter().find(|m| monitor_contains(m, cx, cy)) {
                 return Some(m.clone());
             }
@@ -224,6 +261,7 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let _ = win.set_always_on_top(true);
 }
 
+#[cfg(windows)]
 fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
     let raw = win.hwnd().ok()?.0 as isize;
     if raw == 0 {
@@ -234,6 +272,7 @@ fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
 
 /// WS_EX_NOACTIVATE keeps clicks from stealing focus; WS_EX_TOOLWINDOW keeps the
 /// island out of Alt-Tab.
+#[cfg(windows)]
 pub fn make_non_activating(win: &WebviewWindow) {
     let Some(hwnd) = hwnd_of(win) else { return };
     unsafe {
@@ -243,7 +282,31 @@ pub fn make_non_activating(win: &WebviewWindow) {
     }
 }
 
+/// Linux: the window never takes focus from a click (GTK `accept-focus`), and is
+/// marked as a dock-like utility so it stays out of Alt-Tab and the task bar.
+#[cfg(not(windows))]
+pub fn make_non_activating(win: &WebviewWindow) {
+    use gtk::prelude::{GtkWindowExt, WidgetExt};
+    let _ = win.set_focusable(false);
+    let _ = win.set_skip_taskbar(true);
+    if let Ok(gtk_win) = win.gtk_window() {
+        // Window managers only read the type hint when a window is mapped, and
+        // the island is created visible: unmap it here, `setup` shows it again.
+        gtk_win.hide();
+        gtk_win.set_skip_pager_hint(true);
+        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+        gtk_win.stick();
+    }
+}
+
 /// Temporarily allow activation so a text field inside the island can be typed in.
+#[cfg(not(windows))]
+pub fn set_activating(win: &WebviewWindow, activating: bool) {
+    let _ = win.set_focusable(activating);
+}
+
+/// Temporarily allow activation so a text field inside the island can be typed in.
+#[cfg(windows)]
 pub fn set_activating(win: &WebviewWindow, activating: bool) {
     let Some(hwnd) = hwnd_of(win) else { return };
     unsafe {
@@ -305,7 +368,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let Some(win) = window(&app) else { continue };
                 let Ok(origin) = win.outer_position() else { continue };
                 let scale = win.scale_factor().unwrap_or(1.0);
-                let Some((cx, cy)) = cursor_physical() else { continue };
+                let Some((cx, cy)) = cursor_physical(&app) else { continue };
                 let x = (cx - origin.x as f64) / scale;
                 let y = (cy - origin.y as f64) / scale;
                 let size = match win.inner_size() {
@@ -338,8 +401,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // ours before the file arrives.
                 let down = left_button_down();
                 if down && !was_down {
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || unblock_webview_drops(&handle));
+                    drag_may_start(&app);
                 }
                 was_down = down;
 

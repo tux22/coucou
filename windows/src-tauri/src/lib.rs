@@ -1,6 +1,7 @@
-// Coucou for Windows — app wiring and the commands the island calls.
+// Coucou for Windows and Linux — app wiring and the commands the island calls.
 
 mod claude;
+mod clock;
 mod files;
 mod hooks;
 mod integrations;
@@ -10,8 +11,10 @@ mod pipe;
 mod secrets;
 mod settings;
 mod tray;
+#[cfg(windows)]
 mod win_user;
 
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -29,7 +32,22 @@ use pipe::Pending;
 use settings::Settings;
 
 /// Keeps spawned helpers from flashing a console window.
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Spawns a helper without a console window and without waiting for it.
+fn spawn_quietly(cmd: &mut Command) -> bool {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.spawn().is_ok()
+}
+
+/// "windows" or "linux" — lets the front end name the right keychain and paths.
+const PLATFORM: &str = if cfg!(windows) { "windows" } else { "linux" };
 
 pub struct Shared {
     pub settings: Mutex<Settings>,
@@ -43,6 +61,7 @@ pub struct BootInfo {
     screen: ScreenInfo,
     version: String,
     hook_path: String,
+    platform: &'static str,
 }
 
 #[tauri::command]
@@ -56,6 +75,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
         screen,
         version: env!("CARGO_PKG_VERSION").to_string(),
         hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
+        platform: PLATFORM,
     }
 }
 
@@ -126,31 +146,35 @@ fn open_url(url: String) {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return;
     }
-    let _ = Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    #[cfg(windows)]
+    spawn_quietly(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", &url]));
+    #[cfg(not(windows))]
+    spawn_quietly(Command::new("xdg-open").arg(&url));
 }
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
-/// and falls back to Explorer otherwise.
+/// and falls back to the file manager otherwise.
 #[tauri::command]
 fn open_in_vscode(path: Option<String>) -> bool {
-    // No `cmd /C` anywhere near this. The path is a project folder chosen by
-    // whoever is using Claude Code, and cmd would happily read `&`, `^` and `%`
-    // in a folder name as syntax. Finding the launcher ourselves and handing the
-    // path over as a separate argument keeps it a path.
+    // No `cmd /C` or `sh -c` anywhere near this. The path is a project folder
+    // chosen by whoever is using Claude Code, and a shell would happily read
+    // `&`, `^`, `%` or `$` in a folder name as syntax. Finding the launcher
+    // ourselves and handing the path over as a separate argument keeps it a path.
+    let path = path.filter(|p| !p.is_empty());
     if let Some(code) = find_on_path("code") {
         let mut cmd = Command::new(code);
-        if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
+        if let Some(p) = path.as_deref() {
             cmd.arg(p);
         }
-        if cmd.creation_flags(CREATE_NO_WINDOW).spawn().is_ok() {
+        if spawn_quietly(&mut cmd) {
             return true;
         }
     }
-    if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
+    if let Some(p) = path.as_deref() {
+        #[cfg(windows)]
         let _ = Command::new("explorer").arg(p).spawn();
+        #[cfg(not(windows))]
+        spawn_quietly(Command::new("xdg-open").arg(p));
     }
     false
 }
@@ -158,6 +182,7 @@ fn open_in_vscode(path: Option<String>) -> bool {
 /// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
 /// Rust quotes arguments correctly for `.cmd`/`.bat` targets since 1.77, so
 /// spawning `code.cmd` directly is safe.
+#[cfg(windows)]
 fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
     let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
     let dirs = std::env::var_os("PATH")?;
@@ -170,6 +195,20 @@ fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Our own `which`: the first executable file called `name` on $PATH.
+#[cfg(not(windows))]
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dirs = std::env::var_os("PATH")?;
+    std::env::split_paths(&dirs)
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            std::fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
 }
 
 #[tauri::command]
@@ -279,7 +318,7 @@ fn secret_clear(key: String) -> Result<(), String> {
     secrets::clear(&key)
 }
 
-/// Opens the configured n8n instance — the URL lives in the Credential Manager.
+/// Opens the configured n8n instance — the URL lives in the keychain.
 #[tauri::command]
 fn open_n8n() {
     if let Some(url) = secrets::get("n8n-url") {
@@ -365,7 +404,29 @@ fn open_settings_window(app: AppHandle) {
     show_settings_window(&app);
 }
 
+/// Linux: the island positions itself at the top of the screen, stays above
+/// everything and follows the global cursor. Wayland allows none of that to a
+/// regular client, so GTK is pointed at X11 — XWayland on a Wayland session.
+/// Anyone who sets GDK_BACKEND themselves keeps their choice.
+///
+/// WebKitGTK's DMA-BUF renderer draws transparent windows black or blank on a
+/// number of drivers (NVIDIA above all); the island is small, so the fallback
+/// renderer costs nothing noticeable.
+#[cfg(target_os = "linux")]
+fn prepare_linux_environment() {
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 pub fn run() {
+    // Before GTK starts and before any other thread exists.
+    #[cfg(target_os = "linux")]
+    prepare_linux_environment();
+
     let loaded = settings::load();
     let gate = Arc::new(PollGate::new());
 

@@ -4,12 +4,13 @@
 
 # Coucou
 
-**A tiny friend that lives in your MacBook's notch — or at the top of your screen on Windows — and keeps an eye on your Claude Code sessions.**
+**A tiny friend that lives in your MacBook's notch — or at the top of your screen on Windows and Linux — and keeps an eye on your Claude Code sessions.**
 
 Approve permissions, watch your agents work, drop a file, chat with Claude — all without leaving what you're doing.
 
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-deb%20%7C%20AppImage%20%7C%20tar.gz-FCC624?logo=linux&logoColor=black)
 ![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-native-0A84FF)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=black)
@@ -39,8 +40,8 @@ Meet **Mochi**: a soft little squircle with big eyes that pops out of your notch
 - 🪟 **Drag Mochi onto any window** — attach that window as context for Claude *(macOS)*.
 - 🔌 **Integrations** — Stripe payments, n8n workflows, GitHub, Vercel deployments, Resend emails, Notion, Cal.com. Each one gets its own little colored Mochi.
 - 🎭 **A real character** — idle breathing, blinks, eyes on a sphere that follow your mouse, emotes, 28 handcrafted sounds, a greeting on launch.
-- 🫥 **Invisible when idle** — hides away when nothing is running, peeks out when you hover the notch (the top edge of the screen on Windows).
-- 🔒 **Private by design** — no telemetry, no account. Keys live in your macOS Keychain or Windows Credential Manager. The app only talks to the services you plug in.
+- 🫥 **Invisible when idle** — hides away when nothing is running, peeks out when you hover the notch (the top edge of the screen on Windows and Linux).
+- 🔒 **Private by design** — no telemetry, no account. Keys live in your macOS Keychain, Windows Credential Manager or Linux keyring. The app only talks to the services you plug in.
 
 <table>
 <tr>
@@ -71,6 +72,17 @@ There is no notch on a PC, so the island slides out of the top edge of the scree
 instead of hiding inside one. See [`windows/README.md`](windows/README.md) for the
 rest of the differences.
 
+### Download for Linux
+
+From the [latest Linux release](https://github.com/Louis-CFM/coucou/releases/tag/linux-latest):
+
+- **Debian / Ubuntu**: [`Coucou-Linux-amd64.deb`](https://github.com/Louis-CFM/coucou/releases/download/linux-latest/Coucou-Linux-amd64.deb) → `sudo apt install ./Coucou-Linux-amd64.deb`
+- **Any distribution**: [`Coucou-Linux-x86_64.AppImage`](https://github.com/Louis-CFM/coucou/releases/download/linux-latest/Coucou-Linux-x86_64.AppImage) → `chmod +x` it and run it
+- **Any distribution, no root**: [`Coucou-Linux-x86_64.tar.gz`](https://github.com/Louis-CFM/coucou/releases/download/linux-latest/Coucou-Linux-x86_64.tar.gz) → unpack and run `./install.sh`
+
+It works like the Windows version and runs on X11 or XWayland. See the
+[Linux section of `windows/README.md`](windows/README.md#linux).
+
 ### Build from source
 
 **macOS** — requirements: macOS 15+, Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen).
@@ -92,15 +104,24 @@ npm install
 npm run pack                # installer lands in windows/release/
 ```
 
+**Linux** — requirements: [Rust](https://rustup.rs), Node 20+, WebKitGTK 4.1 development files (full list in [`windows/README.md`](windows/README.md#build)).
+
+```bash
+git clone https://github.com/Louis-CFM/coucou.git
+cd coucou/windows
+npm install
+npm run pack                # .deb, .AppImage and .tar.gz land in windows/release/
+```
+
 ## Setup
 
-Click the Coucou icon in the menu bar (macOS) or in the system tray (Windows) → **Settings…**
+Click the Coucou icon in the menu bar (macOS) or in the system tray (Windows, Linux) → **Settings…**
 
 | What | Why | Where the key goes |
 |---|---|---|
 | **Claude Code hooks** | live sessions and approvals | **Install hooks** — Coucou backs up `~/.claude/settings.json`, merges its hooks and shows you the diff before writing anything |
-| **Anthropic API key** | chat and questions about files | Keychain / Windows Credential Manager |
-| Stripe, n8n, GitHub, Vercel, Resend, Notion, Cal.com | the integration pills | Keychain / Windows Credential Manager, all optional |
+| **Anthropic API key** | chat and questions about files | Keychain / Windows Credential Manager / Linux Secret Service |
+| Stripe, n8n, GitHub, Vercel, Resend, Notion, Cal.com | the integration pills | Keychain / Windows Credential Manager / Linux Secret Service, all optional |
 
 If Coucou isn't running, the hook exits immediately: **Claude Code is never blocked.**
 
@@ -108,7 +129,7 @@ If Coucou isn't running, the hook exits immediately: **Claude Code is never bloc
 
 | Do this | Mochi does that |
 |---|---|
-| Hover the notch (top edge on Windows) | peeks out and says hi 👋 |
+| Hover the notch (top edge on Windows and Linux) | peeks out and says hi 👋 |
 | Click it | opens |
 | Hover Mochi | blinks, eyes grow |
 | Click Mochi | squish + annoyed |
@@ -133,6 +154,12 @@ The macOS app is native Swift 6 / SwiftUI / AppKit with **zero third-party depen
 - A [Tauri 2](https://tauri.app) app (Rust + TypeScript): the island is a transparent, always-on-top window that never steals focus, Mochi is drawn in Canvas 2D with the same shapes, timings and sounds as on the Mac.
 - Claude Code hooks go through a tiny `coucou-hook.exe` and a named pipe; keys live in Windows Credential Manager.
 - Details and differences in [`windows/README.md`](windows/README.md).
+
+**Linux**
+
+- The same Tauri app as Windows, built from the same `windows/` folder, on WebKitGTK under X11/XWayland.
+- Claude Code hooks go through `coucou-hook` and a private Unix socket; keys live in the Secret Service (GNOME Keyring, KWallet…).
+- Packaged as `.deb`, AppImage and `.tar.gz` — see the [Linux section](windows/README.md#linux).
 
 ## Contributing
 

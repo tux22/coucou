@@ -133,15 +133,16 @@ windows/
     island/            state machine, hooks, integrations
     views/             every island view
     settings/          the settings window
-  src-tauri/           Rust backend: window, named pipe, Claude API, pollers
-  hook/                coucou-hook.exe, the Claude Code relay
-  scripts/             icon generator
+  src-tauri/           Rust backend: window, named pipe / Unix socket, Claude API, pollers
+  hook/                coucou-hook(.exe), the Claude Code relay
+  linux/               desktop entry, install script and README for the Linux tarball
+  scripts/             icon generator, pack script
 ```
 
 ### Log
 
-`%LOCALAPPDATA%\Coucou\coucou.log` — hook events, permission decisions, poller
-problems. It stays on your machine.
+`%LOCALAPPDATA%\Coucou\coucou.log` (Linux: `~/.local/share/coucou/coucou.log`)
+— hook events, permission decisions, poller problems. It stays on your machine.
 
 ## What's different from the Mac version
 
@@ -153,3 +154,73 @@ problems. It stays on your machine.
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.
 - Cal.com shows the next bookings as a list rather than the Mac's calendar.
+
+## Linux
+
+The same app runs on Linux: this folder builds for both, and everything above
+applies, with these differences.
+
+### Install
+
+Three packages, from the [latest Linux release](../../releases/tag/linux-latest):
+
+| Package | For | How |
+|---|---|---|
+| `Coucou-Linux-amd64.deb` | Debian, Ubuntu, Mint, Pop!_OS… | `sudo apt install ./Coucou-Linux-amd64.deb` |
+| `Coucou-Linux-x86_64.AppImage` | any distribution | `chmod +x Coucou-Linux-x86_64.AppImage` and run it |
+| `Coucou-Linux-x86_64.tar.gz` | any distribution, no root | unpack, then `./install.sh` (installs in `~/.local`; `./install.sh --uninstall` removes it) |
+
+The `.deb` pulls in what it needs. For the AppImage and the tarball you need
+WebKitGTK 4.1, GTK 3 and libayatana-appindicator3 (the tray icon), which most
+desktops already have, plus the GStreamer "good" plugins for Mochi's sounds.
+
+### What is different
+
+- **X11.** The island has to place itself at the top of the screen, stay above
+  everything and follow the cursor, and Wayland lets no ordinary app do any of
+  that. Coucou therefore asks GTK for X11, which on a Wayland session means
+  XWayland — present on GNOME, KDE and most others. Set `GDK_BACKEND` yourself
+  to override. A compositor is needed for the transparent window (every modern
+  desktop has one).
+- **Keys** live in the **Secret Service** — GNOME Keyring, KWallet or KeePassXC —
+  instead of the Windows Credential Manager. Still never on disk.
+- **The relay** is `~/.local/share/coucou/bin/coucou-hook`, copied there at
+  launch (an AppImage moves on every start, so `settings.json` must point at a
+  stable copy). It talks to the app over a Unix socket in `$XDG_RUNTIME_DIR`,
+  readable only by you, and both ends check with the kernel that the other one
+  is your own account.
+- **Paths:** preferences in `~/.config/coucou/`, log, relay and dropped files in
+  `~/.local/share/coucou/`. `~/.claude/settings.json` gets the same backup,
+  diff and explicit confirmation as everywhere else.
+- **Start at login** adds a standard entry in `~/.config/autostart/`.
+- A file dragged from the file manager has to be dropped on the island itself
+  (on Windows the whole panel takes it).
+
+### Build
+
+You need [Rust](https://rustup.rs), [Node 20+](https://nodejs.org) and the
+WebKitGTK development files. On Debian/Ubuntu:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev libdbus-1-dev libxdo-dev patchelf file
+cd windows
+npm install
+npm run tauri dev      # live-reloading development build
+npm run pack           # .deb, .AppImage and .tar.gz in windows/release/
+```
+
+(Fedora: `webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel
+dbus-devel libxdo-devel`; Arch: `webkit2gtk-4.1 libappindicator-gtk3 librsvg`.)
+
+`npm run pack` leaves the same names the `linux-v*` release workflow publishes:
+
+```
+Coucou-Linux-X.Y.Z-amd64.deb
+Coucou-Linux-X.Y.Z-x86_64.AppImage
+Coucou-Linux-X.Y.Z-x86_64.tar.gz
+```
+
+plus copies under the version-less rolling names. Linux-only settings (bundle
+targets, the relay resource, package dependencies) live in
+`src-tauri/tauri.linux.conf.json`, which Tauri merges over `tauri.conf.json`.
