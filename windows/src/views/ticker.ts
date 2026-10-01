@@ -35,10 +35,14 @@ function makeRow(): Row {
   check.style.color = "#454850"; // the completed tick is dimmer than the chevron
   check.style.position = "absolute";
   chevron.style.position = "absolute";
-  const shimmer = h("span", { class: "tick-text shimmer" });
+  // Both copies are blocks pinned to the same box. As inline spans, a long step
+  // pushed the absolutely positioned dim copy half a line down (its static
+  // position fell after the overflowing shimmer text), so a completed step sat
+  // on top of the current one; and the ellipsis never applied to an inline span.
+  const shimmer = h("span", { class: "tick-text shimmer", style: "display:block" });
   const dim = h("span", {
     class: "tick-text",
-    style: "position:absolute;left:0;right:0;color:#6b7079",
+    style: "position:absolute;top:0;left:0;right:0;color:#6b7079",
   });
   const el = h(
     "div",
@@ -97,7 +101,9 @@ export class Ticker {
 
   sync(task: AgentTask | null) {
     const steps = task && task.steps.length > 0 ? task.steps : ["…"];
-    const idx = task ? Math.min(task.stepIndex, steps.length - 1) : -1;
+    // The "…" placeholder is not a step: counting it as step 0 meant the first
+    // real step (also index 0) looked already shown and never appeared.
+    const idx = task && task.steps.length > 0 ? Math.min(task.stepIndex, steps.length - 1) : -1;
 
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {

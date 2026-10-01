@@ -142,50 +142,91 @@ async fn handle(app: AppHandle, mut pipe: NamedPipeServer) {
     log::line(format!("hook PermissionRequest id={id}"));
     let _ = app.emit_to(WINDOW_LABEL, "hook", payload);
 
-    let decision = wait_for_decision(&id, &mut rx).await;
+    let waited = wait_for_decision(&id, &mut rx, &mut pipe).await;
     app.state::<Pending>().0.lock().unwrap().remove(&id);
 
-    // No decision: say nothing at all. coucou-hook then writes nothing to stdout
-    // and Claude Code asks in the terminal, exactly as if Coucou were closed.
-    if let Some(d) = decision {
-        let _ = pipe.write_all(format!("{d}\n").as_bytes()).await;
-        let _ = pipe.flush().await;
+    match waited {
+        Waited::Answer(d) => {
+            let _ = pipe.write_all(format!("{d}\n").as_bytes()).await;
+            let _ = pipe.flush().await;
+        }
+        // No decision: say nothing at all. coucou-hook then writes nothing to
+        // stdout and Claude Code asks in the terminal, exactly as if Coucou
+        // were closed.
+        Waited::Nothing => {}
+        // Nobody is listening any more; the island's card must go too.
+        Waited::HungUp => {
+            let _ = app.emit_to(WINDOW_LABEL, "approval-gone", json!({ "requestId": id }));
+        }
     }
     let _ = pipe.disconnect();
 }
 
-/// Two waits: a short one for "the card is up", then the long one for a human.
-async fn wait_for_decision(id: &str, rx: &mut mpsc::Receiver<Reply>) -> Option<String> {
+enum Waited {
+    /// A human clicked: `allow` or `deny`.
+    Answer(String),
+    /// Declined, not acknowledged, or timed out: the terminal takes over.
+    Nothing,
+    /// The relay hung up first — Claude Code stopped waiting for it, typically
+    /// because the question was answered in the terminal.
+    HungUp,
+}
+
+/// Resolves once the relay closes its end. The relay sends nothing after its
+/// request, so any read that returns means it is gone (bytes are ignored).
+async fn hung_up(pipe: &mut NamedPipeServer) {
+    let mut scratch = [0u8; 256];
+    loop {
+        match pipe.read(&mut scratch).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => continue,
+        }
+    }
+}
+
+/// Two waits: a short one for "the card is up", then the long one for a human
+/// — during which the relay hanging up ends the wait too.
+async fn wait_for_decision(
+    id: &str,
+    rx: &mut mpsc::Receiver<Reply>,
+    pipe: &mut NamedPipeServer,
+) -> Waited {
     match tokio::time::timeout(ACK_TIMEOUT, rx.recv()).await {
         Ok(Some(Reply::Ack)) => {}
         // A click that beats the ack is still a click.
         Ok(Some(Reply::Decision(d))) => {
             log::line(format!("hook id={id} answered {d}"));
-            return Some(d);
+            return Waited::Answer(d);
         }
         Ok(Some(Reply::Decline)) => {
             log::line(format!("hook id={id} not shown — terminal takes over"));
-            return None;
+            return Waited::Nothing;
         }
-        Ok(None) => return None,
+        Ok(None) => return Waited::Nothing,
         Err(_) => {
             log::line(format!("hook id={id} island never acknowledged — terminal takes over"));
-            return None;
+            return Waited::Nothing;
         }
     }
 
-    match tokio::time::timeout(DECISION_TIMEOUT, rx.recv()).await {
-        Ok(Some(Reply::Decision(d))) => {
-            log::line(format!("hook id={id} answered {d}"));
-            Some(d)
-        }
-        Ok(Some(Reply::Decline)) => {
-            log::line(format!("hook id={id} released without a decision"));
-            None
-        }
-        _ => {
-            log::line(format!("hook id={id} timed out — terminal takes over"));
-            None
+    tokio::select! {
+        reply = tokio::time::timeout(DECISION_TIMEOUT, rx.recv()) => match reply {
+            Ok(Some(Reply::Decision(d))) => {
+                log::line(format!("hook id={id} answered {d}"));
+                Waited::Answer(d)
+            }
+            Ok(Some(Reply::Decline)) => {
+                log::line(format!("hook id={id} released without a decision"));
+                Waited::Nothing
+            }
+            _ => {
+                log::line(format!("hook id={id} timed out — terminal takes over"));
+                Waited::Nothing
+            }
+        },
+        _ = hung_up(pipe) => {
+            log::line(format!("hook id={id} relay hung up — answered elsewhere"));
+            Waited::HungUp
         }
     }
 }

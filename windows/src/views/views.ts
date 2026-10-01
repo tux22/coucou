@@ -35,6 +35,8 @@ export interface ViewHost {
   focus?(): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
+  /** True while the view still needs frames to finish an animation. */
+  readonly animating?: boolean;
 }
 
 // ── Shared pieces ─────────────────────────────────────────────────────────────
@@ -84,6 +86,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
   const soundBtn = h("button", { title: "Mute", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOn, 14));
+  // Always there, even with a request waiting: minimizing never loses it, since
+  // reopening the island leads straight back to the card.
+  const minBtn = h("button", { title: "Minimize (Esc)", onclick: () => actions.collapse() }, svg(ICONS.minus, 14));
 
   function go(v: IslandViewName) {
     actions.blip();
@@ -94,7 +99,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
-    h("div", { class: "header-actions" }, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, gearBtn, soundBtn, minBtn),
   );
 
   return {
@@ -163,6 +168,9 @@ function buildOverview(actions: ViewActions): ViewHost {
     tick(nowMs: number) {
       if (mode === "ticker") ticker.tick(nowMs);
     },
+    get animating() {
+      return mode === "ticker" && ticker.animating;
+    },
     sync() {
       const task = State.focusTask;
       if (task?.id !== lastFocus) {
@@ -227,7 +235,7 @@ function buildOverview(actions: ViewActions): ViewHost {
 }
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
-  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const label = task.id === "integration_claude" ? "Claude Code" : task.name;
   const canvas = createMiniBot(task, 24);
   const pill = h(
     "div",
@@ -298,7 +306,12 @@ function buildApproval(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "needs permission"));
+      // Several sessions may be waiting: name the one this card belongs to, and
+      // say how many are queued behind it.
+      const req = State.pendingApproval;
+      const queued = State.approvals.length;
+      const asking = req && State.focusTask ? { ...State.focusTask, name: req.project } : State.focusTask;
+      who.append(agentWho(asking, queued > 1 ? `needs permission · 1 of ${queued}` : "needs permission"));
       // The whole point of approving here rather than in the terminal: this line
       // is the command, the file path or the URL being authorised, not just the
       // name of the tool asking.

@@ -33,6 +33,9 @@ pub const HOOK_EVENTS: &[(&str, u64)] = &[
     ("PostToolUse", 10),
     ("PostToolUseFailure", 10),
     ("PermissionRequest", 120),
+    // A permission denied in the terminal: the only event that tells us a
+    // request the island is showing was answered there with "no".
+    ("PermissionDenied", 10),
     ("Notification", 10),
     ("Stop", 10),
     ("StopFailure", 10),
@@ -245,9 +248,9 @@ fn current_fingerprint() -> String {
 
 pub fn status() -> HookStatus {
     let current = read_settings_lossy();
-    // Installed means every event is hooked the current way: an install made in
-    // the old shell form shows up as "Install hooks…", and its diff shows the
-    // entries being rewritten.
+    // Installed means every event is hooked the current way: an install made by
+    // an older Coucou (missing a newer event, or in the old shell form) shows up
+    // as "Install hooks…", and its diff shows just what changes.
     let installed = current
         .get("hooks")
         .and_then(Value::as_object)
@@ -590,6 +593,17 @@ mod tests {
         assert_eq!(after["tui"]["x"], 1);
         let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
         assert!(pre.iter().any(|e| serde_json::to_string(e).unwrap().contains("other-tool.exe")));
+        assert!(status().installed);
+
+        // An install from an older Coucou, missing a newer event, is not
+        // "installed": the settings window offers to add what is missing.
+        let mut older = after.clone();
+        older["hooks"].as_object_mut().unwrap().remove("PermissionDenied");
+        std::fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        assert!(!status().installed);
+        let upgrade = preview(true).unwrap();
+        assert!(upgrade.diff.contains("PermissionDenied"), "the diff must add the missing event");
+        write(true, &upgrade.fingerprint).unwrap();
         assert!(status().installed);
 
         // A file that moved since the preview is refused, and left alone.
