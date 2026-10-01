@@ -196,5 +196,11 @@ Check "with Coucou closed the relay exits at once ($ms ms) and prints nothing" (
 
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 Get-ChildItem $Out | ForEach-Object { Write-Host "  $($_.Name)" }
-if ($failures -gt 0) { Write-Host "$failures check(s) failed"; exit 1 }
+if ($failures -gt 0) {
+  # The log says what the app saw (events, acks, decisions): enough to tell a
+  # missed click from a request the relay gave up on.
+  Write-Host "--- coucou.log (last 60 lines) ---"
+  Get-Content (Join-Path $Out 'coucou.log') -Tail 60 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+  Write-Host "$failures check(s) failed"; exit 1
+}
 Write-Host "all checks passed"
