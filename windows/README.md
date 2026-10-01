@@ -44,7 +44,7 @@ installs for the current user only — no admin prompt.
 | Click Mochi | It gets annoyed. Three times in a row and it goes dizzy |
 | Rest the pointer on Mochi for two seconds | Hearts |
 | Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
-| `Esc` | Closes the island |
+| `Esc`, or the `–` button | Closes the island — even with a permission request waiting: reopening it leads straight back to the card |
 | Tray icon | Open, Settings…, Pause, Quit |
 
 Everything else happens on its own: a Claude Code permission request opens the
@@ -136,6 +136,21 @@ windows/
   scripts/             icon generator
 ```
 
+### End-to-end test
+
+`scripts/e2e/windows.ps1` starts a release build, sends it Claude Code hook
+events through the real relay and named pipe, clicks the island (the approval
+queue, Allow/Deny, minimize and reopen) and checks what Claude Code would
+receive, saving screenshots to `windows/e2e-out/`. It points the app at
+throwaway folders, so your own settings are never touched. Quit Coucou first.
+
+```powershell
+npx tauri build --no-bundle
+pwsh scripts/e2e/windows.ps1
+```
+
+The `E2E` workflow runs it on every pull request touching `windows/`.
+
 ### Log
 
 `%LOCALAPPDATA%\Coucou\coucou.log` — hook events, permission decisions, poller
@@ -146,7 +161,10 @@ problems. It stays on your machine.
 - No notch, so the island lives at the top centre of the screen and retracts into
   the top edge instead of hiding in a notch.
 - Permission approval works from **any** terminal; the Mac build only listens to
-  VS Code sessions.
+  VS Code sessions. Requests from several sessions queue up on the card
+  ("1 of 2") and each gets its own answer; the island stays open while one waits,
+  and one answered in the terminal leaves the card as soon as Claude Code runs
+  or denies that call (Claude Code sends no event for the answer itself).
 - Not in this version: sending a file by email, dragging Mochi onto a window to
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.

@@ -24,8 +24,14 @@ export interface AgentTask {
 export interface ApprovalInfo {
   requestId: string;
   sessionId: string;
+  /** Project folder name of the session asking — several may be waiting. */
+  project: string;
   tool: string;
   command: string;
+  /** Tool + input, to recognise the call once it runs without us. */
+  callKey: string;
+  /** Claude Code's id for the call, when the event carries one. */
+  toolUseId: string;
 }
 
 export interface ChatMessage {
@@ -58,7 +64,9 @@ const task = (
 
 /** AgentTask.integrationAgents — same ids, names and colours as macOS. */
 export const INTEGRATION_AGENTS: AgentTask[] = [
-  task("integration_claude", "VS Code", "#F5F6F8", "claudeCode"),
+  // "VS Code" on macOS, which only follows VS Code sessions; here every
+  // terminal is followed, so the pill is named after Claude Code itself.
+  task("integration_claude", "Claude Code", "#F5F6F8", "claudeCode"),
   task("integration_resend", "Resend", "#22C55E", "n8n"),
   task("integration_n8n", "n8n", "#F29B38", "n8n"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
@@ -124,7 +132,6 @@ class AppState {
   /** Cursor relative to the island's top-left corner. */
   mouseInIsland = { x: 0, y: 0 };
 
-  isPinned = false;
   paused = false;
 
   uploadProgress = 0;
@@ -136,7 +143,29 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
-  pendingApproval: ApprovalInfo | null = null;
+  /**
+   * Permission requests waiting for a click, oldest first. Every one of them is
+   * acknowledged to its relay, so each must stay reachable until it is answered
+   * here, answered in the terminal, or times out.
+   */
+  approvals: ApprovalInfo[] = [];
+
+  /** The request the approval card shows. */
+  get pendingApproval(): ApprovalInfo | null {
+    return this.approvals[0] ?? null;
+  }
+
+  /** A request waiting for a human keeps the island from closing on its own. */
+  get isPinned(): boolean {
+    return this.approvals.length > 0;
+  }
+
+  /** Removes a request from the queue; true if it was there. */
+  removeApproval(requestId: string): boolean {
+    const before = this.approvals.length;
+    this.approvals = this.approvals.filter((a) => a.requestId !== requestId);
+    return this.approvals.length !== before;
+  }
 
   integrations: Record<string, IntegrationInfo> = {};
 
@@ -199,7 +228,7 @@ class AppState {
     this.notify();
   }
 
-  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4). */
+  /** loadIntegrationTasks() — Claude Code always on, the rest opt-in (max 4). */
   loadIntegrationTasks() {
     for (const proto of INTEGRATION_AGENTS) {
       const shouldLoad =
@@ -264,6 +293,8 @@ class AppState {
   }
 
   defaultView(): IslandViewName {
+    // Reopening the island always leads back to a request still waiting.
+    if (this.approvals.length > 0) return "approval";
     return this.tasks.length === 0 ? "empty" : "overview";
   }
 }

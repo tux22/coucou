@@ -5,13 +5,56 @@
 
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { State, type ApprovalInfo } from "../core/state";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
 
-/** Clears the approval card if no decision was made before the hook gave up. */
-let pendingTimeout: number | null = null;
+/** Per request: drops its card once the relay has given up on it. */
+const approvalTimers = new Map<string, number>();
+
+/**
+ * A session that moved on — its turn ended, or the user typed a new prompt —
+ * cannot still be waiting for a permission: whatever it asked was answered in
+ * the terminal. Its cards go, and the relay is released.
+ */
+function dropSessionApprovals(island: Island, sessionId: string | undefined) {
+  if (!sessionId) return;
+  for (const a of State.approvals.filter((x) => x.sessionId === sessionId)) {
+    releaseApproval(island, a.requestId);
+  }
+}
+
+/** Identifies one tool call, to match a request with the call it asked about. */
+function callKey(tool: string, input: Record<string, unknown>): string {
+  return `${tool}\u0000${JSON.stringify(input)}`;
+}
+
+/** Forgets a request, stopping its timer and releasing its relay. */
+function releaseApproval(island: Island, requestId: string) {
+  const timer = approvalTimers.get(requestId);
+  if (timer != null) window.clearTimeout(timer);
+  approvalTimers.delete(requestId);
+  void Bridge.approvalDecline(requestId);
+  island.approvalGone(requestId);
+}
+
+/**
+ * The tool call a card asks about ran, failed or was denied: the user answered
+ * in the terminal — Claude Code sends no event for that answer itself — and the
+ * card would now be asking about something already settled. Matched on
+ * tool_use_id when both sides carry it, else on the tool and its exact input.
+ */
+function releaseAnsweredElsewhere(island: Island, payload: HookPayload) {
+  const id = payload.tool_use_id ?? "";
+  const key = callKey(payload.tool_name ?? "", payload.tool_input ?? {});
+  const sessionId = payload.session_id ?? "";
+  const same = (a: ApprovalInfo) =>
+    a.sessionId === sessionId && (id && a.toolUseId ? a.toolUseId === id : a.callKey === key);
+  for (const a of State.approvals.filter(same)) {
+    releaseApproval(island, a.requestId);
+  }
+}
 
 interface HookPayload {
   hook_event_name?: string;
@@ -23,6 +66,8 @@ interface HookPayload {
   prompt?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  /** Identifies one tool call across PermissionRequest, PostToolUse… */
+  tool_use_id?: string;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
 }
@@ -138,6 +183,15 @@ function clearSession() {
 
 export function registerHookHandlers(island: Island) {
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
+  // The relay hung up: Claude Code stopped waiting for it (answered in the
+  // terminal, or the session was interrupted). Its card has nothing left to do.
+  void onEvent<{ requestId: string }>("approval-gone", ({ requestId }) => {
+    const timer = approvalTimers.get(requestId);
+    if (timer != null) window.clearTimeout(timer);
+    approvalTimers.delete(requestId);
+    island.approvalGone(requestId);
+    State.notify();
+  });
 }
 
 function handleHook(island: Island, payload: HookPayload) {
@@ -190,6 +244,7 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "UserPromptSubmit": {
+      dropSessionApprovals(island, payload.session_id);
       ensurePill();
       State.updateTask(agentId, "thinking");
       // The field is `prompt`; reading `message` meant this step was always blank.
@@ -209,13 +264,22 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "PostToolUse":
+      releaseAnsweredElsewhere(island, payload);
       State.updateTask(agentId, "working");
       break;
 
-    case "PostToolUseFailure":
+    case "PermissionDenied": {
+      releaseAnsweredElsewhere(island, payload);
+      State.appendStep(agentId, "✕ denied");
+      break;
+    }
+
+    case "PostToolUseFailure": {
+      releaseAnsweredElsewhere(island, payload);
       State.updateTask(agentId, "working");
       State.appendStep(agentId, "⚠ failed");
       break;
+    }
 
     case "Notification": {
       const message = payload.message ?? "";
@@ -231,6 +295,7 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "Stop":
+      dropSessionApprovals(island, payload.session_id);
       State.updateTask(agentId, "finished");
       if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
       Sound.play("finish");
@@ -247,6 +312,7 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "StopFailure":
+      dropSessionApprovals(island, payload.session_id);
       State.updateTask(agentId, "error");
       Sound.play("error");
       if (focused) surface("error", true);
@@ -254,6 +320,7 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "SessionEnd":
+      dropSessionApprovals(island, payload.session_id);
       if (isExternalAgent) {
         State.removeTask(agentId);
       } else {
@@ -280,51 +347,44 @@ function handleHook(island: Island, payload: HookPayload) {
       }
 
       const requestId = payload.request_id ?? "";
-      // One card, one request. A second one must never quietly replace the first
-      // — that would leave a human staring at request B while request A waits for
-      // a decision nobody can give. Hand it straight back to the terminal.
-      if (State.pendingApproval && State.pendingApproval.requestId !== requestId) {
-        if (requestId) void Bridge.approvalDecline(requestId);
-        break;
-      }
+      if (!requestId || State.approvals.some((a) => a.requestId === requestId)) break;
       upsert(projectName, cwd);
-      if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
-      State.pendingApproval = {
+      // Queued, never replaced: a request that arrives while another card is up
+      // waits its turn behind it, and each one gets its own answer.
+      State.approvals.push({
         requestId,
         sessionId: payload.session_id ?? "",
+        project: projectName,
         tool,
         command: approvalTarget(tool, input),
-      };
+        callKey: callKey(tool, input),
+        toolUseId: payload.tool_use_id ?? "",
+      });
+      const first = State.approvals.length === 1;
       // The relay's short ack window closes in 800 ms; everything below this
-      // line is synchronous, so the card really is up by the time it lands.
-      if (requestId) void Bridge.approvalAck(requestId);
+      // line is synchronous, so the request really is reachable when it lands.
+      void Bridge.approvalAck(requestId);
       State.updateTask(CLAUDE_ID, "approval");
-      State.isPinned = true;
       Sound.play("approval");
-      if (focused) {
+      if (!first) {
+        // The card is already up (or one click away); it now reads "1 of N".
+      } else if (focused) {
         island.alert("approval");
       } else {
         // Another agent holds the view, so the card would yank it away. The badge
         // is the signal instead — but it has to be on screen for that to mean
-        // anything, hence the reveal. We just told the relay a human can act.
+        // anything, hence the reveal. Opening the island leads to the card.
         State.setPillBadge(CLAUDE_ID, "approval");
         island.reveal();
       }
       // Coucou answers within 108 s or not at all; after that the terminal has
       // taken over and the card would be lying.
-      pendingTimeout = window.setTimeout(() => {
-        pendingTimeout = null;
-        if (!State.pendingApproval) return;
-        State.pendingApproval = null;
-        State.isPinned = false;
-        island.dropPin();
-        State.updateTask(CLAUDE_ID, "working");
-        State.setPillBadge(CLAUDE_ID, null);
-        if (State.view === "approval") island.setView(State.defaultView());
-        State.notify();
-      }, 110_000);
+      approvalTimers.set(requestId, window.setTimeout(() => {
+        approvalTimers.delete(requestId);
+        island.approvalGone(requestId);
+      }, 110_000));
       break;
     }
 

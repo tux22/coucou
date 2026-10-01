@@ -110,6 +110,8 @@ export class Island {
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
+        // The Claude pill is the way back to a request still waiting.
+        if (id === "integration_claude" && State.approvals.length > 0) this.setView("approval");
       },
       openTerminal: () => {
         const cwd = State.focusTask?.sessionCwd ?? null;
@@ -140,12 +142,7 @@ export class Island {
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
         void Bridge.approvalDecision(req.requestId, d);
-        State.pendingApproval = null;
-        State.isPinned = false;
-        this.fsm.pinned = false;
-        State.updateTask("integration_claude", "working");
-        State.setPillBadge("integration_claude", null);
-        this.setView(State.defaultView());
+        this.approvalGone(req.requestId);
       },
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
@@ -224,6 +221,7 @@ export class Island {
   // ── FSM ─────────────────────────────────────────────────────────────────────
 
   private wireFsm() {
+    this.fsm.pinned = () => State.isPinned;
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.onTransition = (from, to) => {
       switch (to) {
@@ -263,7 +261,6 @@ export class Island {
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
       Sound.play("close");
-      State.isPinned = false;
       void Bridge.focusWindow(false);
     }
     if (mode !== "expanded") {
@@ -315,8 +312,6 @@ export class Island {
   }
 
   collapse() {
-    State.isPinned = false;
-    this.fsm.pinned = false;
     // Drive the state machine rather than the mode: setting the mode behind its
     // back left it thinking the island was still open, and a click on the compact
     // island then did nothing — the island could never be reopened.
@@ -325,7 +320,6 @@ export class Island {
 
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
   alert(view: IslandViewName) {
-    this.fsm.pinned = State.isPinned;
     this.fsm.forceHome();
     this.expand(view);
   }
@@ -335,8 +329,23 @@ export class Island {
   }
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
-  dropPin() {
-    this.fsm.pinned = false;
+  /**
+   * A permission request left the queue — answered here, answered in the
+   * terminal, or timed out. The card moves on to the next one, or the island
+   * goes back to normal once nobody is waiting.
+   */
+  approvalGone(requestId: string) {
+    const wasShown = State.pendingApproval?.requestId === requestId;
+    if (!State.removeApproval(requestId)) return;
+    if (State.approvals.length > 0) {
+      if (wasShown && State.view === "approval") State.notify();
+      return;
+    }
+    State.updateTask("integration_claude", "working");
+    State.setPillBadge("integration_claude", null);
+    if (State.view === "approval") this.setView(State.defaultView());
+    this.fsm.unpinned();
+    State.notify();
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────
@@ -545,7 +554,8 @@ export class Island {
     });
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
+      // Waiting requests are not lost by minimizing: reopening leads back to them.
+      if (e.key === "Escape" && State.mode === "expanded") this.collapse();
       State.lastActivity = performance.now();
     });
 
@@ -733,7 +743,10 @@ export class Island {
       ? settling
       : settling ||
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
-        greetingActive || this.engine.busy || UploadSeq.isActive;
+        greetingActive || this.engine.busy || UploadSeq.isActive ||
+        // A step scrolling into the ticker: without this the loop could stop
+        // mid-scroll and the new step would only appear with the next event.
+        this.views.get(State.view)?.animating === true;
 
     if (busy) {
       requestAnimationFrame(this.frame);
