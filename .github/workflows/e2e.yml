@@ -1,8 +1,9 @@
 name: E2E
 
-# Builds the Windows app and drives it end to end: the real app, the real
-# coucou-hook relay over the named pipe, real clicks on the island. Uploads the
-# screenshots and the log as an artifact. Publishes nothing.
+# Builds the Windows/Linux app and drives it end to end on both systems: the
+# real app, the real coucou-hook relay (named pipe / Unix socket), real clicks
+# on the island. Uploads the screenshots, GIFs and logs as artifacts.
+# Publishes nothing.
 
 on:
   pull_request:
@@ -15,6 +16,54 @@ permissions:
   contents: read
 
 jobs:
+  linux:
+    # 24.04: the same GNOME/Mutter 46 as Ubuntu 24.04 LTS desktops.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries and the virtual desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libxdo-dev patchelf file \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            xvfb mutter dbus-x11 xdotool ffmpeg x11-xserver-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: e2e-linux-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: e2e-linux-cargo-
+
+      - run: npm ci
+      - name: Build
+        run: npx tauri build --no-bundle
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: End to end
+        run: scripts/e2e/linux.sh target/release/coucou e2e-out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-linux
+          path: windows/e2e-out
+
   windows:
     runs-on: windows-latest
     defaults:

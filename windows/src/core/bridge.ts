@@ -26,6 +26,16 @@ export interface BootInfo {
   screen: { x: number; y: number; width: number; height: number; scale: number };
   version: string;
   hookPath: string;
+  platform: Platform;
+}
+
+export type Platform = "windows" | "linux";
+
+/** Where API keys live, in words the user recognises. */
+export function keychainName(platform: Platform): string {
+  return platform === "linux"
+    ? "your system keyring (Secret Service)"
+    : "the Windows Credential Manager";
 }
 
 export const Bridge = {
@@ -50,14 +60,18 @@ export const Bridge = {
 
   openUrl: (url: string) => call<void>("open_url", { url }),
 
-  /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
-  openInVSCode: (path: string | null) => call<boolean>("open_in_vscode", { path }),
+  /** Windows "Open terminal" → the session's folder in VS Code, or Explorer. */
+  openProject: (path: string | null) => call<boolean>("open_project", { path }),
+
+  /** Linux: switches tmux to the pane a session runs in. */
+  jumpToSession: (tmuxSocket: string, tmuxPane: string) =>
+    call<boolean>("jump_to_session", { tmuxSocket, tmuxPane }),
 
   quit: () => call<void>("quit_app"),
 
   openSettingsWindow: () => call<void>("open_settings_window"),
 
-  /** Writes to %LOCALAPPDATA%\Coucou\coucou.log, next to the Rust lines. */
+  /** Writes to coucou.log (%LOCALAPPDATA%\Coucou or ~/.local/share/coucou), next to the Rust lines. */
   log: (message: string) => call<void>("log_line", { message }),
 
   // ── Claude Code hooks ─────────────────────────────────────────────────────

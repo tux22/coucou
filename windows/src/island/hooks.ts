@@ -1,11 +1,12 @@
 // Claude Code hook events → island state.
 // Port of HookServer.processEvent / processPermissionRequest from the macOS app.
-// Difference from macOS: no terminal filter. On Windows the hook fires from any
-// terminal (Windows Terminal, VS Code, PowerShell…) and all of them are handled.
+// Difference from macOS: no terminal filter. On Windows and Linux the hook fires
+// from any terminal (Windows Terminal, GNOME Terminal, Konsole, VS Code,
+// PowerShell…) and all of them are handled.
 
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
-import { State, type ApprovalInfo } from "../core/state";
+import { State, type ApprovalInfo, type SessionJump } from "../core/state";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -56,6 +57,14 @@ function releaseAnsweredElsewhere(island: Island, payload: HookPayload) {
   }
 }
 
+/** The tmux pane the hook ran in, if any — see `SessionJump`. */
+function sessionJump(payload: HookPayload): SessionJump | null {
+  const pane = payload.tmux_pane ?? "";
+  // $TMUX is "<socket>,<server pid>,<session>".
+  const socket = (payload.tmux ?? "").split(",")[0] ?? "";
+  return /^%\d+$/.test(pane) && socket.startsWith("/") ? { tmuxSocket: socket, tmuxPane: pane } : null;
+}
+
 interface HookPayload {
   hook_event_name?: string;
   request_id?: string;
@@ -66,6 +75,9 @@ interface HookPayload {
   prompt?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  /** $TMUX and $TMUX_PANE of the shell Claude Code runs in. */
+  tmux?: string;
+  tmux_pane?: string;
   /** PostToolUseFailure: what went wrong. */
   error?: unknown;
   /** Identifies one tool call across PermissionRequest, PostToolUse… */
@@ -108,7 +120,7 @@ function lastPathComponent(p: string): string {
 }
 
 /** frenchStep() — same labels as the macOS app. */
-// English, like the rest of the Windows island (the Mac build says these
+// English, like the rest of the Windows/Linux island (the Mac build says these
 // in French).
 const TOOL_LABELS: Record<string, string> = {
   Bash: "Run",
@@ -169,11 +181,12 @@ function approvalTarget(tool: string, input: Record<string, unknown>): string {
   return tool;
 }
 
-function upsert(projectName: string, cwd: string) {
+function upsert(projectName: string, cwd: string, jump: SessionJump | null) {
   const t = State.tasks.find((x) => x.id === CLAUDE_ID);
   if (!t) return;
   t.name = projectName;
   if (cwd) t.sessionCwd = cwd;
+  t.sessionJump = jump;
 }
 
 function clearSession() {
@@ -182,6 +195,7 @@ function clearSession() {
   t.steps = [];
   t.stepIndex = 0;
   t.name = "Claude Code";
+  t.sessionJump = null;
   t.pillBadge = null;
 }
 
@@ -219,6 +233,7 @@ function handleHook(island: Island, payload: HookPayload) {
   const isExternalAgent = validAgent !== null;
 
   const focused = State.focusId === agentId;
+  const jump = sessionJump(payload);
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
@@ -236,7 +251,7 @@ function handleHook(island: Island, payload: HookPayload) {
     if (isExternalAgent) {
       State.upsertExternalAgent(agentId, validAgent!, agentColor(validAgent!));
     } else {
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, jump);
     }
   };
 
@@ -357,7 +372,7 @@ function handleHook(island: Island, payload: HookPayload) {
 
       const requestId = payload.request_id ?? "";
       if (!requestId || State.approvals.some((a) => a.requestId === requestId)) break;
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, jump);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
       // Queued, never replaced: a request that arrives while another card is up
@@ -370,6 +385,7 @@ function handleHook(island: Island, payload: HookPayload) {
         command: approvalTarget(tool, input),
         callKey: callKey(tool, input),
         toolUseId: payload.tool_use_id ?? "",
+        jump,
       });
       const first = State.approvals.length === 1;
       // The relay's short ack window closes in 800 ms; everything below this

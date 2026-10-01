@@ -1,6 +1,7 @@
-// Named-pipe server for coucou-hook.
+// Relay server for coucou-hook.
 //
-// `\\.\pipe\coucou-<sid>` — one instance per connection. Every hook event is
+// One connection per hook event, over whatever `platform::serve_relay`
+// provides: a named pipe on Windows, a Unix socket on Linux. Every hook event is
 // forwarded to the island as a `hook` event. `PermissionRequest` is the only one
 // that keeps its connection open: it waits for the island's decision and writes
 // it back on the same pipe, which is how approving from the island works.
@@ -24,8 +25,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::island::WINDOW_LABEL;
@@ -56,46 +56,19 @@ pub struct Pending(pub Mutex<HashMap<String, mpsc::Sender<Reply>>>);
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// `\\.\pipe\coucou-<sid>` — must match coucou-hook's `pipe_path()` exactly.
-pub fn pipe_name() -> String {
-    let key = crate::win_user::current_user_sid()
-        .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));
-    format!(r"\\.\pipe\coucou-{key}")
+/// One accepted relay connection, whatever carries it.
+pub trait Relay: AsyncRead + AsyncWrite + Unpin + Send {
+    /// Ends the conversation once the answer (if any) is flushed.
+    fn finish(&mut self);
 }
 
 pub fn start(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let name = pipe_name();
-        // first_pipe_instance also means we refuse to join a pipe somebody else
-        // already owns under our name, rather than serving on top of it.
-        let mut server = match ServerOptions::new().first_pipe_instance(true).create(&name) {
-            Ok(s) => s,
-            Err(err) => {
-                log::line(format!("cannot open the relay pipe: {err}"));
-                return;
-            }
-        };
-        loop {
-            if server.connect().await.is_err() {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-            // Hand the connected instance to a task and listen on a fresh one.
-            let next = match ServerOptions::new().create(&name) {
-                Ok(s) => s,
-                Err(err) => {
-                    log::line(format!("cannot reopen the relay pipe: {err}"));
-                    return;
-                }
-            };
-            let connected = std::mem::replace(&mut server, next);
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move { handle(app, connected).await });
-        }
-    });
+    tauri::async_runtime::spawn(crate::platform::serve_relay(app));
 }
 
-async fn handle(app: AppHandle, mut pipe: NamedPipeServer) {
+/// Reads one hook event from a relay connection and, for a permission
+/// request, writes the island's answer back on it.
+pub async fn handle<R: Relay>(app: AppHandle, mut pipe: R) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -128,7 +101,7 @@ async fn handle(app: AppHandle, mut pipe: NamedPipeServer) {
     if event != "PermissionRequest" {
         log::line(format!("hook {event}"));
         let _ = app.emit_to(WINDOW_LABEL, "hook", payload);
-        let _ = pipe.disconnect();
+        pipe.finish();
         return;
     }
 
@@ -159,7 +132,7 @@ async fn handle(app: AppHandle, mut pipe: NamedPipeServer) {
             let _ = app.emit_to(WINDOW_LABEL, "approval-gone", json!({ "requestId": id }));
         }
     }
-    let _ = pipe.disconnect();
+    pipe.finish();
 }
 
 enum Waited {
@@ -174,7 +147,7 @@ enum Waited {
 
 /// Resolves once the relay closes its end. The relay sends nothing after its
 /// request, so any read that returns means it is gone (bytes are ignored).
-async fn hung_up(pipe: &mut NamedPipeServer) {
+async fn hung_up<R: Relay>(pipe: &mut R) {
     let mut scratch = [0u8; 256];
     loop {
         match pipe.read(&mut scratch).await {
@@ -186,10 +159,10 @@ async fn hung_up(pipe: &mut NamedPipeServer) {
 
 /// Two waits: a short one for "the card is up", then the long one for a human
 /// — during which the relay hanging up ends the wait too.
-async fn wait_for_decision(
+async fn wait_for_decision<R: Relay>(
     id: &str,
     rx: &mut mpsc::Receiver<Reply>,
-    pipe: &mut NamedPipeServer,
+    pipe: &mut R,
 ) -> Waited {
     match tokio::time::timeout(ACK_TIMEOUT, rx.recv()).await {
         Ok(Some(Reply::Ack)) => {}

@@ -1,6 +1,6 @@
 [package]
 name = "coucou-hook"
-description = "Relays Claude Code hook events to Coucou over a named pipe"
+description = "Relays Claude Code hook events to Coucou over a named pipe or a Unix socket"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
+
+# Our uid, and the uid of whoever serves the socket (SO_PEERCRED).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Just enough Win32 to know our own SID and to check who is serving the pipe.
 [target.'cfg(windows)'.dependencies]

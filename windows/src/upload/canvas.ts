@@ -11,7 +11,7 @@ import {
   type UploadEyeShape, type UploadFrame,
 } from "./sequence";
 
-const FONT = 'system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif';
+const FONT = 'system-ui, "Segoe UI Variable Text", "Segoe UI", Cantarell, Ubuntu, "Noto Sans", sans-serif';
 
 /** Mirrors the reference `rr()`: a rounded rect, radius clamped to the box. */
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {

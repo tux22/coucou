@@ -2,6 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import { Bridge, type Platform } from "./bridge";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -19,6 +20,17 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /** Where the latest session runs, when it can be jumped back to. */
+  sessionJump?: SessionJump | null;
+}
+
+/**
+ * A tmux pane a session runs in: the only terminal location Linux lets Coucou
+ * return to (Wayland forbids raising another app's window).
+ */
+export interface SessionJump {
+  tmuxSocket: string;
+  tmuxPane: string;
 }
 
 export interface ApprovalInfo {
@@ -32,6 +44,7 @@ export interface ApprovalInfo {
   callKey: string;
   /** Claude Code's id for the call, when the event carries one. */
   toolUseId: string;
+  jump?: SessionJump | null;
 }
 
 export interface ChatMessage {
@@ -172,6 +185,8 @@ class AppState {
   lastActivity = performance.now();
 
   settings: Settings = { ...DEFAULT_SETTINGS };
+  /** Set at boot; picks wording that differs between Windows and Linux. */
+  platform: Platform = "windows";
 
   private listeners = new Set<Listener>();
 
@@ -290,6 +305,27 @@ class AppState {
       this.settings.activeIntegrations = [...active, id];
     }
     this.loadIntegrationTasks();
+  }
+
+  /**
+   * Whether "Open terminal" leads anywhere for this task. On Linux only a
+   * session running inside tmux can be returned to; for any other the island
+   * just reports, with no button that would open something unrelated.
+   */
+  canOpenTerminal(task: AgentTask | null): boolean {
+    if (!task) return false;
+    return this.platform !== "linux" || task.sessionJump != null;
+  }
+
+  /** "Open terminal": back to the session (Linux, tmux) or its folder (Windows). */
+  openTerminal(task: AgentTask | null) {
+    if (!task || !this.canOpenTerminal(task)) return;
+    if (this.platform === "linux") {
+      const j = task.sessionJump!;
+      void Bridge.jumpToSession(j.tmuxSocket, j.tmuxPane);
+    } else {
+      void Bridge.openProject(task.sessionCwd ?? null);
+    }
   }
 
   defaultView(): IslandViewName {

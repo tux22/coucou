@@ -65,12 +65,13 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
 
   const actions = h("div", { class: "int-actions" });
   if (task.id === "integration_claude") {
-    actions.append(
+    if (State.canOpenTerminal(task)) actions.append(
       h("button", {
         class: "link-btn",
         style: `color:${task.color}b3`,
-        text: "Open Visual Studio Code",
-        onclick: () => void Bridge.openInVSCode(task.sessionCwd ?? null),
+        // Linux returns to the session's tmux pane; Windows opens VS Code.
+        text: State.platform === "linux" ? "Open terminal" : "Open Visual Studio Code",
+        onclick: () => State.openTerminal(task),
       }),
     );
   } else if (task.id === "integration_n8n") {

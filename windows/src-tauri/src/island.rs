@@ -3,7 +3,8 @@
 //
 // There is no notch on a PC, so the island is a black shape drawn at the top
 // centre of the main display inside a borderless, transparent, always-on-top
-// window that never takes focus.
+// window that never takes focus. Everything OS-specific — reading the cursor,
+// window styles, the input region — lives in `platform`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,16 +13,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use windows::Win32::Foundation::{HWND, POINT};
-use windows::core::BOOL;
-use windows::Win32::Foundation::LPARAM;
-use windows::Win32::System::Ole::RevokeDragDrop;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
-};
+use crate::platform::{self, Input};
 
 /// Logical size of the full window — the largest island view, like the macOS panel.
 pub const PANEL_W: f64 = 720.0;
@@ -114,51 +106,6 @@ pub fn window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(WINDOW_LABEL)
 }
 
-fn cursor_physical() -> Option<(f64, f64)> {
-    let mut p = POINT::default();
-    unsafe { GetCursorPos(&mut p).ok()? };
-    Some((p.x as f64, p.y as f64))
-}
-
-/// Lets dropped files reach the app again.
-///
-/// wry installs its drop target by walking the webview's child windows **once**,
-/// when the webview is created. WebView2 creates `Chrome_RenderWidgetHostHWND`
-/// later and registers its own target on it; being the innermost window, that one
-/// wins, and since the page has no HTML5 drop handler it refuses everything — the
-/// "no drop" cursor, with nothing reaching Tauri. Revoking it makes OLE fall
-/// through to the target wry registered on the parent widget, which is the one
-/// that feeds Tauri's drag events.
-///
-/// Cheap and idempotent, so it is simply re-run whenever a drag might be starting.
-pub fn unblock_webview_drops(app: &AppHandle) {
-    for label in [WINDOW_LABEL, "settings"] {
-        let Some(win) = app.get_webview_window(label) else { continue };
-        let Some(hwnd) = hwnd_of(&win) else { continue };
-        unsafe {
-            let _ = EnumChildWindows(Some(hwnd), Some(revoke_render_widget), LPARAM(0));
-        }
-    }
-}
-
-unsafe extern "system" fn revoke_render_widget(hwnd: HWND, _: LPARAM) -> BOOL {
-    let mut name = [0u16; 64];
-    let len = unsafe { GetClassNameW(hwnd, &mut name) };
-    if len > 0 {
-        let class = String::from_utf16_lossy(&name[..len as usize]);
-        if class == "Chrome_RenderWidgetHostHWND" {
-            let _ = unsafe { RevokeDragDrop(hwnd) };
-        }
-    }
-    true.into()
-}
-
-/// True while the left mouse button is held — the only signal we get that a
-/// drag might be in flight before it reaches the window.
-fn left_button_down() -> bool {
-    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
-}
-
 fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
     let p = m.position();
     let s = m.size();
@@ -172,7 +119,7 @@ fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
 fn target_monitor(app: &AppHandle, pref: &str) -> Option<Monitor> {
     let monitors = app.available_monitors().ok()?;
     if pref == "cursor" {
-        if let Some((cx, cy)) = cursor_physical() {
+        if let Some((cx, cy)) = platform::cursor_physical(app) {
             if let Some(m) = monitors.iter().find(|m| monitor_contains(m, cx, cy)) {
                 return Some(m.clone());
             }
@@ -211,6 +158,8 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
+    // Where the window does not shrink, the input region does (see `platform`).
+    let collapsed = collapsed && platform::SHRINKS_TO_STRIP;
     let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
@@ -222,39 +171,6 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     // Moving across displays can rescale the window: re-assert the physical size.
     let _ = win.set_size(PhysicalSize::new(pw, ph));
     let _ = win.set_always_on_top(true);
-}
-
-fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
-    let raw = win.hwnd().ok()?.0 as isize;
-    if raw == 0 {
-        return None;
-    }
-    Some(HWND(raw as *mut _))
-}
-
-/// WS_EX_NOACTIVATE keeps clicks from stealing focus; WS_EX_TOOLWINDOW keeps the
-/// island out of Alt-Tab.
-pub fn make_non_activating(win: &WebviewWindow) {
-    let Some(hwnd) = hwnd_of(win) else { return };
-    unsafe {
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let want = ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
-    }
-}
-
-/// Temporarily allow activation so a text field inside the island can be typed in.
-pub fn set_activating(win: &WebviewWindow, activating: bool) {
-    let Some(hwnd) = hwnd_of(win) else { return };
-    unsafe {
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let want = if activating {
-            ex & !(WS_EX_NOACTIVATE.0 as isize)
-        } else {
-            ex | WS_EX_NOACTIVATE.0 as isize
-        };
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
-    }
 }
 
 /// Position, size and scale of the monitor the island lives on. Any change here
@@ -305,7 +221,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let Some(win) = window(&app) else { continue };
                 let Ok(origin) = win.outer_position() else { continue };
                 let scale = win.scale_factor().unwrap_or(1.0);
-                let Some((cx, cy)) = cursor_physical() else { continue };
+                let Some((cx, cy)) = platform::cursor_physical(&app) else { continue };
                 let x = (cx - origin.x as f64) / scale;
                 let y = (cy - origin.y as f64) / scale;
                 let size = match win.inner_size() {
@@ -336,10 +252,9 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // the mouse, which also makes the drop zone as forgiving as the Mac's.
                 // A press may be the start of a drag: make sure the drop target is
                 // ours before the file arrives.
-                let down = left_button_down();
+                let down = platform::left_button_down();
                 if down && !was_down {
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || unblock_webview_drops(&handle));
+                    platform::drag_may_start(&app);
                 }
                 was_down = down;
 
@@ -352,17 +267,11 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let accept = on_island || dragging;
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     gate.ignoring.store(!accept, Ordering::Relaxed);
-                    let _ = win.set_ignore_cursor_events(!accept);
+                    platform::set_input(&app, if accept { Input::All } else { Input::Nothing });
                 }
 
                 let _ = win.emit("cursor", CursorPayload { x, y });
             }
         }
     });
-}
-
-pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
-    if let Some(win) = window(app) {
-        let _ = win.set_ignore_cursor_events(ignore);
-    }
 }

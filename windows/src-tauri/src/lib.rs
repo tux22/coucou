@@ -1,4 +1,5 @@
-// Coucou for Windows — app wiring and the commands the island calls.
+// Coucou for Windows and Linux — app wiring and the commands the island calls.
+// Anything OS-specific lives in `platform`.
 
 mod claude;
 mod files;
@@ -7,13 +8,11 @@ mod integrations;
 mod island;
 mod log;
 mod pipe;
+mod platform;
 mod secrets;
 mod settings;
 mod tray;
-mod win_user;
 
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -28,9 +27,6 @@ use island::{PollGate, ScreenInfo};
 use pipe::Pending;
 use settings::Settings;
 
-/// Keeps spawned helpers from flashing a console window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 pub struct Shared {
     pub settings: Mutex<Settings>,
     pub gate: Arc<PollGate>,
@@ -43,6 +39,8 @@ pub struct BootInfo {
     screen: ScreenInfo,
     version: String,
     hook_path: String,
+    /// "windows" or "linux" — lets the front end name the right keychain and paths.
+    platform: &'static str,
 }
 
 #[tauri::command]
@@ -56,6 +54,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
         screen,
         version: env!("CARGO_PKG_VERSION").to_string(),
         hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
+        platform: platform::NAME,
     }
 }
 
@@ -94,7 +93,14 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
     // The wake strip must always take the mouse, and a resize invalidates the flag.
-    island::set_ignore_cursor(&app, false);
+    // Where the window shrinks to the strip it takes the mouse whole; where it
+    // keeps its size (Linux) only the strip does.
+    let input = if collapsed && !platform::SHRINKS_TO_STRIP {
+        platform::Input::WakeStrip
+    } else {
+        platform::Input::All
+    };
+    platform::set_input(&app, input);
     shared.gate.forget_ignore_state();
     shared.gate.set_active(!collapsed);
 }
@@ -108,7 +114,7 @@ fn set_island_rect(shared: State<Shared>, x: f64, y: f64, width: f64, height: f6
 #[tauri::command]
 fn focus_window(app: AppHandle, focused: bool) {
     let Some(win) = island::window(&app) else { return };
-    island::set_activating(&win, focused);
+    platform::set_activating(&win, focused);
     if focused {
         let _ = win.set_focus();
     }
@@ -126,50 +132,19 @@ fn open_url(url: String) {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return;
     }
-    let _ = Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    platform::open_url(&url);
 }
 
-/// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
-/// and falls back to Explorer otherwise.
+/// "Open terminal" on Windows: the session's folder in VS Code, or Explorer.
 #[tauri::command]
-fn open_in_vscode(path: Option<String>) -> bool {
-    // No `cmd /C` anywhere near this. The path is a project folder chosen by
-    // whoever is using Claude Code, and cmd would happily read `&`, `^` and `%`
-    // in a folder name as syntax. Finding the launcher ourselves and handing the
-    // path over as a separate argument keeps it a path.
-    if let Some(code) = find_on_path("code") {
-        let mut cmd = Command::new(code);
-        if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
-            cmd.arg(p);
-        }
-        if cmd.creation_flags(CREATE_NO_WINDOW).spawn().is_ok() {
-            return true;
-        }
-    }
-    if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
-        let _ = Command::new("explorer").arg(p).spawn();
-    }
-    false
+fn open_project(path: Option<String>) -> bool {
+    platform::open_project(path.as_deref().filter(|p| !p.is_empty()))
 }
 
-/// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
-/// Rust quotes arguments correctly for `.cmd`/`.bat` targets since 1.77, so
-/// spawning `code.cmd` directly is safe.
-fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
-    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    let dirs = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&dirs) {
-        for ext in exts.split(';').filter(|e| !e.is_empty()) {
-            let candidate = dir.join(format!("{stem}{}", ext.to_lowercase()));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+/// "Open terminal" on Linux: back to the tmux pane the session runs in.
+#[tauri::command]
+fn jump_to_session(tmux_socket: String, tmux_pane: String) -> bool {
+    platform::jump_to_session(&tmux_socket, &tmux_pane)
 }
 
 #[tauri::command]
@@ -279,7 +254,7 @@ fn secret_clear(key: String) -> Result<(), String> {
     secrets::clear(&key)
 }
 
-/// Opens the configured n8n instance — the URL lives in the Credential Manager.
+/// Opens the configured n8n instance — the URL lives in the keychain.
 #[tauri::command]
 fn open_n8n() {
     if let Some(url) = secrets::get("n8n-url") {
@@ -366,6 +341,9 @@ fn open_settings_window(app: AppHandle) {
 }
 
 pub fn run() {
+    // Before the webview (and GTK) start, and before any other thread exists.
+    platform::prepare_environment();
+
     let loaded = settings::load();
     let gate = Arc::new(PollGate::new());
 
@@ -388,7 +366,8 @@ pub fn run() {
             focus_window,
             reposition,
             open_url,
-            open_in_vscode,
+            open_project,
+            jump_to_session,
             quit_app,
             hooks_status,
             hooks_preview,
@@ -415,7 +394,7 @@ pub fn run() {
             create_settings_window(&handle);
 
             if let Some(win) = island::window(&handle) {
-                island::make_non_activating(&win);
+                platform::make_non_activating(&win);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
             }

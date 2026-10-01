@@ -48,7 +48,8 @@ export default defineConfig({
   server: { port: 1420, strictPort: true, host: "127.0.0.1" },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
-    target: "chrome110",
+    // WebView2 on Windows, WebKitGTK on Linux.
+    target: ["chrome110", "safari16"],
     minify: "esbuild",
     sourcemap: false,
     emptyOutDir: true,
