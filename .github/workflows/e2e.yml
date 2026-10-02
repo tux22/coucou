@@ -41,7 +41,7 @@ jobs:
 
       - run: npm ci
       - name: Build
-        run: npx tauri build --no-bundle
+        run: npx tauri build
       - name: Unit tests
         run: cargo test --workspace
       - name: End to end
@@ -53,3 +53,11 @@ jobs:
         with:
           name: e2e-windows
           path: windows/e2e-out
+
+      # Fork-only test branch: the installer, to try this build on a real PC.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: coucou-windows-installer-test
+          path: windows/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7
